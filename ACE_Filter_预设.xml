@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ACE反作弊过滤预设 — 导入到WPE FilterList -->
+<FilterList>
+  <!-- NJ入站: 阻断检测任务 -->
+  <Filter>
+    <Name>ACE-NJ-Inbound-Clean</Name>
+    <Mode>Advanced</Mode>
+    <Action>Replace</Action>
+    <Search>01 0A 00 23</Search>
+    <Replace>01 0A 00 00</Replace>
+    <SocketID>*</SocketID>
+    <RemoteID>*</RemoteID>
+    <Direction>Recv</Direction>
+    <Notes>NJ入站 01 0A 00 23 检测任务 → 替换为无效标记</Notes>
+  </Filter>
+  <Filter>
+    <Name>ACE-NJ-Inbound-Clean-09</Name>
+    <Mode>Advanced</Mode>
+    <Action>Replace</Action>
+    <Search>01 0A 00 09</Search>
+    <Replace>01 0A 00 00</Replace>
+    <SocketID>*</SocketID>
+    <RemoteID>*</RemoteID>
+    <Direction>Recv</Direction>
+    <Notes>NJ入站 01 0A 00 09 命令 → 替换为无效标记</Notes>
+  </Filter>
+  <!-- 65010出站: 零化大检测帧 -->
+  <Filter>
+    <Name>ACE-65010-Outbound-Clean</Name>
+    <Mode>Advanced</Mode>
+    <Action>Intercept</Action>
+    <Search>33 66 00 0B 00 0C 40 13</Search>
+    <Replace></Replace>
+    <SocketID>*</SocketID>
+    <RemoteID>*</RemoteID>
+    <Direction>Send</Direction>
+    <Notes>65010 40_13 检测帧 → 拦截(不发送)</Notes>
+  </Filter>
+</FilterList>

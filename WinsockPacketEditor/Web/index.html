@@ -1,0 +1,330 @@
+﻿<!DOCTYPE html>
+<html>
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="chrome=1">
+    <meta name="viewport" content="width=420, initial-scale=1">
+    <link rel="icon" href="./web_images/wpe.ico" />
+    <link rel="stylesheet" type="text/css" href="./web_images/stylesheet.css" media="screen">
+    <link rel="stylesheet" type="text/css" href="./web_images/github-dark.css" media="screen">
+    <link rel="stylesheet" type="text/css" href="./web_images/print.css" media="print">
+    <link rel="stylesheet" type="text/css" href="./web_images/downloads.css" media="all">
+    <script src="./web_images/jquery-1.11.3.min.js" type="text/javascript"></script>
+    <script src="./web_images/script.js" type="text/javascript"></script>
+
+    <title>Winsock Packet Editor</title>
+
+    <style>
+        .bold {
+            font-weight: bold;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            display: none;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        .button-container {
+            margin-bottom: 10px;
+        }
+
+            .button-container button {
+                margin-right: 10px;
+                padding: 5px 10px;
+                cursor: pointer;
+                background-color: #f9f9f9;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+
+                .button-container button.active {
+                    background-color: #4CAF50;
+                    color: white;
+                    border-color: #4CAF50;
+                }
+    </style>
+</head>
+
+<body style="padding: 0px 0px 154px;">
+    <div id="container" style="height: auto !important; min-height: 0px !important;">
+        <div class="inner" style="height: auto !important;">
+            <div id="header-container"></div>
+            <section id="main_content" style="height: auto !important;">
+
+                <h2>>> 系统监控</h2>
+
+                <div class="button-container">
+                    <button id="btnSystem" class="active">查看服务器状态</button>
+                    <button id="btnSocket">查看封包数据</button>
+                    <button id="btnProxy">查看代理数据</button>
+                </div>
+
+                <table id="systemTable">
+                    <thead>
+                        <tr>
+                            <th class="bold">服务器</th>
+                            <th><span id="SelectMode"></span></th>
+                        </tr>
+                    </thead>
+                    <tr>
+                        <td>
+                            <img src="./images/cpu.png" style="vertical-align: middle;">
+                        </td>
+                        <td>
+                            <span id="CPU" class="bold">0%</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <img src="./images/mem.png" style="vertical-align: middle;">
+                        </td>
+                        <td>
+                            <span id="MEM" class="bold">0%</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <img src="./images/Time.png" style="vertical-align: middle;">
+                        </td>
+                        <td>
+                            <span id="ServerUptime"></span>
+                        </td>
+                    </tr>
+                </table>
+
+                <table id="socketTable">
+                    <thead>
+                        <tr>
+                            <th class="bold">封包数据</th>
+                            <th><span id="SocketWorkMode"></span> - <span id="SocketProcess"></span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>封包总数</td>
+                            <td><span id="SocketTotal" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>滤镜执行</td>
+                            <td><span id="SocketFilter" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>缓存区</td>
+                            <td><span id="SocketCache" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>过滤</td>
+                            <td><span id="SocketLeach" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>发送</td>
+                            <td><span id="SocketSend" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>接收</td>
+                            <td><span id="SocketRecv" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>发送到</td>
+                            <td><span id="SocketSendTo" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>接收自</td>
+                            <td><span id="SocketRecvFrom" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>WSA发送</td>
+                            <td><span id="SocketWSASend" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>WSA接收</td>
+                            <td><span id="SocketWSARecv" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>WSA发送到</td>
+                            <td><span id="SocketWSASendTo" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>WSA接收自</td>
+                            <td><span id="SocketWSARecvFrom" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>流量</td>
+                            <td><span id="SocketBytes">0</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <table id="proxyTable">
+                    <thead>
+                        <tr>
+                            <th class="bold">代理数据</th>
+                            <th><span id="ProxyWorkMode"></span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>代理总数</td>
+                            <td><span id="ProxyTotal" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>TCP</td>
+                            <td><span id="ProxyTCP" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>UDP</td>
+                            <td><span id="ProxyUDP" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>缓存区</td>
+                            <td><span id="ProxyCache" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>在线</td>
+                            <td><span id="ProxyOnLine" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>链接数</td>
+                            <td><span id="ProxyLinks" class="bold">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>速率</td>
+                            <td><span id="ProxySpeed">0</span></td>
+                        </tr>
+                        <tr>
+                            <td>流量</td>
+                            <td><span id="ProxyBytes">0</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+            </section>
+
+            <div id="footer-container"></div>
+        </div>
+    </div>
+
+    <script>
+        let startTime;
+
+        function fetchData() {
+            if (!startTime) {
+                fetch('./SystemInfo/GetStartTime')
+                    .then(response => response.json())
+                    .then(data => {
+                        startTime = new Date(data);
+                        updateUptime();
+                        setInterval(updateUptime, 1000);
+                    });
+            }
+
+            fetch('./SystemInfo/GetCPUAndMemory')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('CPU').textContent = data[0];
+                    document.getElementById('MEM').textContent = data[1];
+                })
+
+            fetch('./SystemInfo/GetSelectMode')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('SelectMode').textContent = data;
+                })
+
+            fetch('./ProxyInfo/GetProxyInfo')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('ProxyWorkMode').textContent = data[0];
+                    document.getElementById('ProxyTotal').textContent = data[1];
+                    document.getElementById('ProxyTCP').textContent = data[2];
+                    document.getElementById('ProxyUDP').textContent = data[3];
+                    document.getElementById('ProxyCache').textContent = data[4];
+                    document.getElementById('ProxyOnLine').textContent = data[5];
+                    document.getElementById('ProxyLinks').textContent = data[6];
+                    document.getElementById('ProxySpeed').textContent = data[7];
+                    document.getElementById('ProxyBytes').textContent = data[8];
+                })
+
+            fetch('./SocketInfo/GetSocketInfo')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('SocketProcess').textContent = data[0];
+                    document.getElementById('SocketWorkMode').textContent = data[1];
+                    document.getElementById('SocketTotal').textContent = data[2];
+                    document.getElementById('SocketFilter').textContent = data[3];
+                    document.getElementById('SocketCache').textContent = data[4];
+                    document.getElementById('SocketLeach').textContent = data[5];
+                    document.getElementById('SocketSend').textContent = data[6];
+                    document.getElementById('SocketRecv').textContent = data[7];
+                    document.getElementById('SocketSendTo').textContent = data[8];
+                    document.getElementById('SocketRecvFrom').textContent = data[9];
+                    document.getElementById('SocketWSASend').textContent = data[10];
+                    document.getElementById('SocketWSARecv').textContent = data[11];
+                    document.getElementById('SocketWSASendTo').textContent = data[12];
+                    document.getElementById('SocketWSARecvFrom').textContent = data[13];
+                    document.getElementById('SocketBytes').textContent = data[14];
+                })
+        }
+
+        function updateUptime() {
+            const now = new Date();
+            const uptime = now - startTime;
+            const days = Math.floor(uptime / (1000 * 60 * 60 * 24));
+            const hours = Math.floor((uptime % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            const minutes = Math.floor((uptime % (1000 * 60 * 60)) / (1000 * 60));
+            const seconds = Math.floor((uptime % (1000 * 60)) / 1000);
+            document.getElementById('ServerUptime').textContent = ` ${days} 天 ${hours} 小时 ${minutes} 分 ${seconds} 秒`;
+        }
+
+        document.getElementById('btnSystem').addEventListener('click', () => {
+            switchTableDisplay(true, false, false);
+        });
+
+        document.getElementById('btnSocket').addEventListener('click', () => {
+            switchTableDisplay(false, true, false);
+        });
+
+        document.getElementById('btnProxy').addEventListener('click', () => {
+            switchTableDisplay(false, false, true);
+        });
+
+        function switchTableDisplay(systemVisible, socketVisible, proxyVisible) {
+            const systemTable = document.getElementById('systemTable');
+            const socketTable = document.getElementById('socketTable');
+            const proxyTable = document.getElementById('proxyTable');
+            const btnSystem = document.getElementById('btnSystem');
+            const btnSocket = document.getElementById('btnSocket');
+            const btnProxy = document.getElementById('btnProxy');
+
+            systemTable.style.display = systemVisible ? 'table' : 'none';
+            socketTable.style.display = socketVisible ? 'table' : 'none';
+            proxyTable.style.display = proxyVisible ? 'table' : 'none';
+
+            btnSystem.classList.toggle('active', systemVisible);
+            btnSocket.classList.toggle('active', socketVisible);
+            btnProxy.classList.toggle('active', proxyVisible);
+        }
+
+        window.onload = () => {
+            fetchData();
+            switchTableDisplay(true, false, false);
+        };
+
+        setInterval(fetchData, 5000);
+    </script>
+
+</body>
+</html>
