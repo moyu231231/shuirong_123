@@ -153,7 +153,7 @@ struct InjectHomeView: View {
                     alertTitle = "注入成功"
                     let tgt = BuiltinInjector.lastTargetPath
                     let short = tgt.isEmpty ? "(未知)" : (tgt as NSString).lastPathComponent
-                    alertMsg = "已写入 \(app.name)\n目标: \(short)\ndylib: sy_ports.dylib\n\n游戏内不再弹窗（确认会闪）。\n进游戏约 20 秒后静默打上报告补丁。\n点「好」后打开。"
+                    alertMsg = "已写入 \(app.name)\n目标: \(short)\ndylib: sy_ports.dylib\n\n已恢复悬浮窗；已去掉会闪的机器码补丁，改用 fishhook。\n进游戏数秒后应出提示。\n点「好」后打开。"
                     pendingLaunchID = app.bundleID
                     showAlert = true
                     reload()

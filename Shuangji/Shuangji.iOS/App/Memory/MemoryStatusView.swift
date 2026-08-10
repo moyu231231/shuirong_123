@@ -12,25 +12,16 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("如何确认补丁成功") {
-                    Text("游戏内不弹窗。进游戏约 20 秒后，回本 App 点「检查补丁」。")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
+                Section("当前") {
+                    row("机器码补丁", "已关闭（会闪）")
+                    row("fishhook", "仅报告导入")
+                    row("提示", "游戏内悬浮窗")
+                }
+                Section("检查") {
                     Text(statusText)
                         .font(.system(.body, design: .monospaced))
                     Button(busy ? "检查中…" : "检查补丁") { checkStatus() }
                         .disabled(busy)
-                }
-                Section("状态含义") {
-                    row("OK patched=N", "成功，N 为补丁数（>0）")
-                    row("WAIT …", "已加载，还在等待/延时")
-                    row("FAIL …", "失败（无 tersafe 或补丁 0）")
-                    row("无文件", "未进过游戏或 dylib 未加载")
-                }
-                Section("另可对照") {
-                    Text("链路/网关里举报包是否还在上涨；有 OK 且 patched>0 即内存层已挂上。")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
             }
             .navigationTitle("内存")
@@ -40,9 +31,9 @@ struct MemoryStatusView: View {
 
     private func row(_ k: String, _ v: String) -> some View {
         HStack {
-            Text(k).font(.caption)
+            Text(k)
             Spacer()
-            Text(v).font(.caption2).foregroundColor(.secondary).multilineTextAlignment(.trailing)
+            Text(v).font(.caption).foregroundColor(.secondary)
         }
     }
 
@@ -57,19 +48,18 @@ struct MemoryStatusView: View {
             }
             var body = ""
             for path in statusPaths {
-                let ex = SpawnUtil.rootRun(sy.path, args: ["exists", "--path", path])
-                if ex.code != 0 { continue }
+                if SpawnUtil.rootRun(sy.path, args: ["exists", "--path", path]).code != 0 { continue }
                 let r = SpawnUtil.rootRun(sy.path, args: ["cat", "--path", path])
                 body = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !body.isEmpty { break }
             }
             DispatchQueue.main.async {
                 if body.isEmpty {
-                    statusText = "无状态文件\n请先注入并进游戏约 20 秒后再查"
+                    statusText = "无状态文件，请进游戏后再查"
                 } else if body.hasPrefix("OK") {
                     statusText = "✅ \(body)"
                 } else if body.hasPrefix("WAIT") {
-                    statusText = "⏳ \(body)\n再等一会后重查"
+                    statusText = "⏳ \(body)"
                 } else {
                     statusText = "❌ \(body)"
                 }

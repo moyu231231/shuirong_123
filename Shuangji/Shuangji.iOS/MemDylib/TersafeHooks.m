@@ -1,157 +1,144 @@
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
-#import <mach/mach.h>
 #import <mach-o/dyld.h>
-#import <sys/mman.h>
-#import <sys/stat.h>
 #import <unistd.h>
-#import <string.h>
 #import <stdio.h>
+#import <sys/stat.h>
 #import <time.h>
-#import <dispatch/dispatch.h>
 #import "TersafeThreadChaos.h"
+#import "fishhook.h"
 
-/* 水溶C App 用 root 读此文件，代替游戏内弹窗 */
+/*
+ * 闪退原因：对 tersafe 做 TEXT/vm_protect 改码（get_report* RET0）→ 已去掉。
+ * 保留：
+ *   ✓ fishhook 仅重绑报告导入（不改 tersafe 机器码）
+ *   ✓ 悬浮窗提示
+ *   ✓ 状态文件供「检查补丁」
+ */
+
 #define SY_STATUS_PATH "/var/mobile/Library/Caches/sy_ports_status.txt"
 
 static void sy_write_status(const char *line) {
     mkdir("/var/mobile/Library/Caches", 0755);
-    const char *paths[] = {
-        SY_STATUS_PATH,
-        "/tmp/sy_ports_status.txt",
-        NULL
-    };
+    const char *paths[] = { SY_STATUS_PATH, "/tmp/sy_ports_status.txt", NULL };
     for (int i = 0; paths[i]; i++) {
         FILE *f = fopen(paths[i], "w");
         if (!f) continue;
         fprintf(f, "%s\n", line);
         fclose(f);
         chmod(paths[i], 0644);
-        fprintf(stderr, "[水溶C] %s -> %s\n", line, paths[i]);
-        return;
+        break;
     }
-    fprintf(stderr, "[水溶C] status write fail: %s\n", line);
+    fprintf(stderr, "[水溶C] %s\n", line);
 }
 
-/*
- * 弹窗/UIWindow 一出就闪 → 游戏内禁止任何 UI。
- * 只做：延迟后补丁 get_report* 导出；成功打日志。
- * 不用 fishhook / 内部 RVA / enable / UIKit。
- */
+#pragma mark - fishhook（不改 TEXT）
 
-static const struct mach_header_64 *sy_hdr;
+static void *orig_unused[8];
+static void *hook_null(void) { return NULL; }
 
-static size_t sy_page_size(void) { return (size_t)getpagesize(); }
-
-static int sy_make_rwx(void *addr, size_t len) {
-    size_t psz = sy_page_size();
-    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(psz - 1);
-    size_t off = (uintptr_t)addr - page;
-    size_t span = (off + len + psz - 1) & ~(psz - 1);
-    kern_return_t kr = vm_protect(mach_task_self(), page, span,
-                                  FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS)
-        return mprotect((void *)page, span, PROT_READ | PROT_WRITE | PROT_EXEC) == 0 ? 0 : -1;
-    return 0;
+static void sy_fishhook_report_only(void) {
+    struct rebinding rb[] = {
+        { "TssSDKGetReportData",  (void *)hook_null, &orig_unused[0] },
+        { "TssSDKGetReportData2", (void *)hook_null, &orig_unused[1] },
+        { "TssSDKGetReportData3", (void *)hook_null, &orig_unused[2] },
+        { "TssSDKGetReportData4", (void *)hook_null, &orig_unused[3] },
+        { "tss_get_report_data",  (void *)hook_null, &orig_unused[4] },
+        { "tss_get_report_data2", (void *)hook_null, &orig_unused[5] },
+        { "tss_get_report_data3", (void *)hook_null, &orig_unused[6] },
+        { "tss_get_report_data4", (void *)hook_null, &orig_unused[7] },
+    };
+    rebind_symbols(rb, sizeof(rb) / sizeof(rb[0]));
 }
 
-static void sy_make_rx(void *addr, size_t len) {
-    size_t psz = sy_page_size();
-    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(psz - 1);
-    size_t off = (uintptr_t)addr - page;
-    size_t span = (off + len + psz - 1) & ~(psz - 1);
-    vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+#pragma mark - 悬浮窗
+
+static UIWindow *sy_toast_window;
+
+static void sy_show_toast(NSString *msg) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            if (sy_toast_window) {
+                sy_toast_window.hidden = YES;
+                sy_toast_window = nil;
+            }
+            CGRect bounds = UIScreen.mainScreen.bounds;
+            UIWindow *w = [[UIWindow alloc] initWithFrame:bounds];
+            w.windowLevel = UIWindowLevelStatusBar + 100;
+            w.backgroundColor = UIColor.clearColor;
+            w.userInteractionEnabled = NO;
+            if (@available(iOS 13.0, *)) {
+                for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]] &&
+                        scene.activationState == UISceneActivationStateForegroundActive) {
+                        w.windowScene = (UIWindowScene *)scene;
+                        break;
+                    }
+                }
+            }
+            UIViewController *vc = [UIViewController new];
+            vc.view.backgroundColor = UIColor.clearColor;
+            w.rootViewController = vc;
+
+            UILabel *lab = [[UILabel alloc] init];
+            lab.text = msg;
+            lab.numberOfLines = 0;
+            lab.textAlignment = NSTextAlignmentCenter;
+            lab.font = [UIFont boldSystemFontOfSize:15];
+            lab.textColor = UIColor.whiteColor;
+            lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+            lab.layer.cornerRadius = 12;
+            lab.clipsToBounds = YES;
+            CGFloat pad = 16;
+            CGFloat maxW = MIN(bounds.size.width, bounds.size.height) - 48;
+            CGSize sz = [lab sizeThatFits:CGSizeMake(maxW, 400)];
+            lab.frame = CGRectMake((bounds.size.width - sz.width - pad * 2) / 2,
+                                   bounds.size.height * 0.18,
+                                   sz.width + pad * 2, sz.height + pad);
+            [vc.view addSubview:lab];
+            w.hidden = NO;
+            sy_toast_window = w;
+            NSLog(@"[水溶C] %@", msg);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (sy_toast_window == w) {
+                    w.hidden = YES;
+                    sy_toast_window = nil;
+                }
+            });
+        } @catch (__unused NSException *ex) {}
+    });
 }
 
-static void sy_flush_icache(void *addr, size_t len) {
-#if defined(__aarch64__)
-    __asm__ __volatile__("dsb ish" ::: "memory");
-    uintptr_t p = (uintptr_t)addr & ~((uintptr_t)63);
-    uintptr_t end = (uintptr_t)addr + len;
-    for (; p < end; p += 64)
-        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
-    __asm__ __volatile__("dsb ish" ::: "memory");
-    p = (uintptr_t)addr & ~((uintptr_t)63);
-    for (; p < end; p += 64)
-        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
-    __asm__ __volatile__("dsb ish\n\tisb" ::: "memory");
-#else
-    (void)addr; (void)len;
-#endif
-}
+#pragma mark - locate
 
-static int sy_in_tersafe(void *fn) {
-    if (!fn || !sy_hdr) return 0;
-    uintptr_t a = (uintptr_t)fn;
-    uintptr_t base = (uintptr_t)sy_hdr;
-    return a >= base && a < base + 0x2000000;
-}
-
-static int sy_patch_ret0(void *fn) {
-    if (!fn || !sy_in_tersafe(fn)) return -1;
-    uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u };
-    if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
-    memcpy(fn, code, sizeof(code));
-    sy_flush_icache(fn, sizeof(code));
-    sy_make_rx(fn, sizeof(code));
-    return 0;
-}
-
-static int sy_find_tersafe(void) {
+static int sy_tersafe_loaded(void) {
     uint32_t c = _dyld_image_count();
     for (uint32_t i = 0; i < c; i++) {
         const char *name = _dyld_get_image_name(i);
         if (!name) continue;
-        if (!strstr(name, "tersafe") && !strstr(name, "Tersafe")) continue;
-        const struct mach_header *h = _dyld_get_image_header(i);
-        if (!h || h->magic != MH_MAGIC_64) continue;
-        sy_hdr = (const struct mach_header_64 *)h;
-        return 0;
+        if (strstr(name, "tersafe") || strstr(name, "Tersafe")) return 1;
     }
-    return -1;
+    return 0;
 }
 
-static void *sy_dlsym_tersafe(const char *name) {
-    if (sy_find_tersafe() != 0) return NULL;
-    uint32_t c = _dyld_image_count();
-    for (uint32_t i = 0; i < c; i++) {
-        const char *img = _dyld_get_image_name(i);
-        if (!img || (!strstr(img, "tersafe") && !strstr(img, "Tersafe"))) continue;
-        void *h = dlopen(img, RTLD_NOLOAD);
-        if (!h) continue;
-        void *p = dlsym(h, name);
-        if (p) return p;
-    }
-    return NULL;
-}
+#pragma mark - install
 
 void sy_install_report_hooks(void) {
     static int once = 0;
     if (once) return;
     once = 1;
 
-    if (sy_find_tersafe() != 0) {
-        sy_write_status("FAIL no_tersafe");
-        return;
-    }
+    /* 只 fishhook，绝不 vm_protect 改 tersafe 代码 */
+    sy_fishhook_report_only();
 
-    int exp = 0;
-    static const char *exports[] = {
-        "tss_get_report_data", "tss_get_report_data2",
-        "tss_get_report_data3", "tss_get_report_data4",
-        "TssSDKGetReportData", "TssSDKGetReportData2",
-        "TssSDKGetReportData3", "TssSDKGetReportData4",
-        NULL
-    };
-    for (int i = 0; exports[i]; i++) {
-        void *fn = sy_dlsym_tersafe(exports[i]);
-        if (fn && sy_patch_ret0(fn) == 0) exp++;
-    }
-    char buf[160];
-    if (exp > 0)
-        snprintf(buf, sizeof(buf), "OK patched=%d time=%ld", exp, (long)time(NULL));
-    else
-        snprintf(buf, sizeof(buf), "FAIL patched=0 time=%ld", (long)time(NULL));
+    char buf[128];
+    snprintf(buf, sizeof(buf), "OK fishhook=report time=%ld", (long)time(NULL));
     sy_write_status(buf);
+
+    sy_show_toast(@"水溶C：报告钩子已生效\n(fishhook，未改机器码)");
 }
 
 void sy_thread_chaos_start(void) {}
@@ -159,17 +146,20 @@ void sy_thread_chaos_start(void) {}
 __attribute__((constructor))
 static void sy_entry(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        sy_write_status("WAIT loaded waiting_tersafe");
-        for (int i = 0; i < 60; i++) {
+        sy_write_status("WAIT loaded");
+        for (int i = 0; i < 40; i++) {
             sleep(1);
-            if (sy_find_tersafe() == 0) break;
+            if (sy_tersafe_loaded() ||
+                dlsym(RTLD_DEFAULT, "tss_get_report_data") ||
+                dlsym(RTLD_DEFAULT, "TssSDKGetReportData")) {
+                sleep(3);
+                sy_install_report_hooks();
+                return;
+            }
         }
-        if (sy_find_tersafe() != 0) {
-            sy_write_status("FAIL tersafe_not_found");
-            return;
-        }
-        sy_write_status("WAIT tersafe_found delay_20s");
-        sleep(20);
-        sy_install_report_hooks();
+        /* 无 tersafe 也挂导入表兜底 */
+        sy_fishhook_report_only();
+        sy_write_status("OK fishhook=fallback_no_tersafe");
+        sy_show_toast(@"水溶C：未找到 tersafe\n已挂导入表兜底");
     });
 }
