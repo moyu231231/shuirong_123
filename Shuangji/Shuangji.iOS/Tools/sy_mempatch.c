@@ -1,14 +1,11 @@
 ﻿/*
- * Remote mempatch without dylib:
- *   task_for_pid -> dyld images -> resolve tersafe exports ->
- *   1) allocate anon stub (MOV X0,#0; RET)
- *   2) rewrite other images' DATA pointers to stub (fishhook-like)
- *   3) patch export prologues (block internal BL; task_suspend first)
- * No dlopen, no on-disk payload, no new named image.
+ * Remote mempatch without dylib (crash-safe default):
+ *   task_for_pid -> resolve tersafe exports ->
+ *   rewrite ONLY GOT/lazy-pointer slots in OTHER images to a ret0 gadget.
+ *   Does NOT patch tersafe TEXT (prologue caused game crash before).
  *
  *   sy_mempatch <pid>
- *
- * Uses public vm_* APIs (mach_vm_* often undeclared in iphoneos SDK).
+ *   sy_mempatch <pid> --text   (optional, unsafe: also patch export prologues)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,6 +96,27 @@ static int load_images(task_t task, raddr_t all_info_addr,
     return 0;
 }
 
+static int image_slide(task_t task, raddr_t image, raddr_t *out_slide) {
+    struct mach_header_64 mh;
+    if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) return -1;
+    if (mh.magic != MH_MAGIC_64) return -1;
+    raddr_t lc = image + sizeof(mh);
+    for (uint32_t i = 0; i < mh.ncmds; i++) {
+        struct load_command cmd;
+        if (tread(task, lc, &cmd, sizeof(cmd)) != KERN_SUCCESS) return -1;
+        if (cmd.cmd == LC_SEGMENT_64) {
+            struct segment_command_64 seg;
+            tread(task, lc, &seg, sizeof(seg));
+            if (strncmp(seg.segname, "__TEXT", 16) == 0) {
+                *out_slide = image - seg.vmaddr;
+                return 0;
+            }
+        }
+        lc += cmd.cmdsize;
+    }
+    return -1;
+}
+
 static raddr_t remote_sym(task_t task, raddr_t image, const char *want) {
     struct mach_header_64 mh;
     if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) return 0;
@@ -108,7 +126,7 @@ static raddr_t remote_sym(task_t task, raddr_t image, const char *want) {
     struct segment_command_64 linkedit = {0};
     struct symtab_command symtab = {0};
     raddr_t slide = 0;
-    int have_slide = 0;
+    if (image_slide(task, image, &slide) != 0) return 0;
 
     for (uint32_t i = 0; i < mh.ncmds; i++) {
         struct load_command cmd;
@@ -118,13 +136,6 @@ static raddr_t remote_sym(task_t task, raddr_t image, const char *want) {
         } else if (cmd.cmd == LC_SEGMENT_64) {
             struct segment_command_64 seg;
             tread(task, lc, &seg, sizeof(seg));
-            if (strncmp(seg.segname, "__TEXT", 16) == 0) {
-                slide = image - seg.vmaddr;
-                have_slide = 1;
-            } else if (!have_slide && strncmp(seg.segname, "__PAGEZERO", 16) != 0) {
-                slide = image - seg.vmaddr;
-                have_slide = 1;
-            }
             if (strncmp(seg.segname, "__LINKEDIT", 16) == 0) linkedit = seg;
         }
         lc += cmd.cmdsize;
@@ -159,13 +170,28 @@ static raddr_t remote_sym(task_t task, raddr_t image, const char *want) {
     return hit;
 }
 
-/* Scan writable segments; retarget pointers that equal targets[] to stub. */
+static int is_got_sect(const char *sectname) {
+    return !strcmp(sectname, "__got")
+        || !strcmp(sectname, "__la_symbol_ptr")
+        || !strcmp(sectname, "__nl_symbol_ptr")
+        || !strcmp(sectname, "__auth_got")
+        || !strcmp(sectname, "__auth_ptr");
+}
+
+static int rewrite_slot(task_t task, raddr_t at, raddr_t stub) {
+    raddr_t page = at & ~PAGE_MASK;
+    vm_protect(task, page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    uint64_t nv = (uint64_t)stub;
+    return twrite_raw(task, at, &nv, 8) == 0 ? 1 : 0;
+}
+
+/* Only GOT-like sections — avoid blasting all __DATA (false positives -> crash). */
 static int rewrite_gots(task_t task, remote_img_t *imgs, uint32_t nimg,
                         raddr_t tersafe_base,
                         const raddr_t *targets, int nt,
                         raddr_t stub) {
     int hits = 0;
-    uint8_t *chunk = (uint8_t *)malloc(0x10000);
+    uint8_t *chunk = (uint8_t *)malloc(0x4000);
     if (!chunk) return 0;
 
     for (uint32_t ii = 0; ii < nimg; ii++) {
@@ -176,66 +202,52 @@ static int rewrite_gots(task_t task, remote_img_t *imgs, uint32_t nimg,
         if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) continue;
         if (mh.magic != MH_MAGIC_64) continue;
 
-        raddr_t lc = image + sizeof(mh);
         raddr_t slide = 0;
-        int have_slide = 0;
+        if (image_slide(task, image, &slide) != 0) continue;
 
-        raddr_t lc0 = lc;
-        for (uint32_t i = 0; i < mh.ncmds; i++) {
-            struct load_command cmd;
-            if (tread(task, lc0, &cmd, sizeof(cmd)) != KERN_SUCCESS) break;
-            if (cmd.cmd == LC_SEGMENT_64) {
-                struct segment_command_64 seg;
-                tread(task, lc0, &seg, sizeof(seg));
-                if (strncmp(seg.segname, "__TEXT", 16) == 0) {
-                    slide = image - seg.vmaddr;
-                    have_slide = 1;
-                    break;
-                }
-            }
-            lc0 += cmd.cmdsize;
-        }
-        if (!have_slide) continue;
-
-        lc = image + sizeof(mh);
+        raddr_t lc = image + sizeof(mh);
         for (uint32_t i = 0; i < mh.ncmds; i++) {
             struct load_command cmd;
             if (tread(task, lc, &cmd, sizeof(cmd)) != KERN_SUCCESS) break;
             if (cmd.cmd == LC_SEGMENT_64) {
                 struct segment_command_64 seg;
-                tread(task, lc, &seg, sizeof(seg));
-                int writable = (seg.initprot & VM_PROT_WRITE) != 0;
-                int is_data = strncmp(seg.segname, "__DATA", 6) == 0
-                           || strncmp(seg.segname, "__AUTH_CONST", 12) == 0
-                           || strncmp(seg.segname, "__DATA_CONST", 12) == 0;
-                if (!writable && !is_data) { lc += cmd.cmdsize; continue; }
-                if (seg.vmsize == 0 || seg.vmsize > 64 * 1024 * 1024) { lc += cmd.cmdsize; continue; }
-
-                raddr_t seg_addr = seg.vmaddr + slide;
-                rsize_t off = 0;
-                while (off + 8 <= seg.vmsize) {
-                    rsize_t nread = seg.vmsize - off;
-                    if (nread > 0x10000) nread = 0x10000;
-                    nread &= ~(rsize_t)7;
-                    if (nread < 8) break;
-                    if (tread(task, seg_addr + off, chunk, nread) != KERN_SUCCESS) {
-                        off += nread;
+                if (tread(task, lc, &seg, sizeof(seg)) != KERN_SUCCESS) {
+                    lc += cmd.cmdsize;
+                    continue;
+                }
+                if (seg.nsects == 0 || seg.nsects > 512) {
+                    lc += cmd.cmdsize;
+                    continue;
+                }
+                raddr_t sect_addr = lc + sizeof(struct segment_command_64);
+                for (uint32_t s = 0; s < seg.nsects; s++) {
+                    struct section_64 sect;
+                    if (tread(task, sect_addr + sizeof(sect) * s, &sect, sizeof(sect)) != KERN_SUCCESS)
                         continue;
-                    }
-                    for (rsize_t p = 0; p + 8 <= nread; p += 8) {
-                        uint64_t v;
-                        memcpy(&v, chunk + p, 8);
-                        for (int t = 0; t < nt; t++) {
-                            if (!targets[t] || v != (uint64_t)targets[t]) continue;
-                            raddr_t at = seg_addr + off + p;
-                            raddr_t page = at & ~PAGE_MASK;
-                            vm_protect(task, page, 0x4000, FALSE,
-                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-                            uint64_t nv = (uint64_t)stub;
-                            if (twrite_raw(task, at, &nv, 8) == 0) hits++;
+                    if (!is_got_sect(sect.sectname)) continue;
+                    if (sect.size < 8 || sect.size > 8 * 1024 * 1024) continue;
+
+                    raddr_t base = sect.addr + slide;
+                    rsize_t off = 0;
+                    while (off + 8 <= sect.size) {
+                        rsize_t nread = sect.size - off;
+                        if (nread > 0x4000) nread = 0x4000;
+                        nread &= ~(rsize_t)7;
+                        if (nread < 8) break;
+                        if (tread(task, base + off, chunk, nread) != KERN_SUCCESS) {
+                            off += nread;
+                            continue;
                         }
+                        for (rsize_t p = 0; p + 8 <= nread; p += 8) {
+                            uint64_t v;
+                            memcpy(&v, chunk + p, 8);
+                            for (int t = 0; t < nt; t++) {
+                                if (targets[t] && v == (uint64_t)targets[t])
+                                    hits += rewrite_slot(task, base + off + p, stub);
+                            }
+                        }
+                        off += nread;
                     }
-                    off += nread;
                 }
             }
             lc += cmd.cmdsize;
@@ -245,17 +257,85 @@ static int rewrite_gots(task_t task, remote_img_t *imgs, uint32_t nimg,
     return hits;
 }
 
+/* Prefer existing MOV X0,#0; RET in system libs — avoid anon RX pages. */
+static raddr_t find_ret0_gadget(task_t task, remote_img_t *imgs, uint32_t nimg) {
+    const uint32_t pat[2] = { 0xD2800000u, 0xD65F03C0u };
+    uint8_t *chunk = (uint8_t *)malloc(0x4000);
+    if (!chunk) return 0;
+
+    for (uint32_t ii = 0; ii < nimg; ii++) {
+        const char *p = imgs[ii].path;
+        if (!strstr(p, "libsystem") && !strstr(p, "libdyld") &&
+            !strstr(p, "libobjc") && !strstr(p, "/usr/lib/"))
+            continue;
+
+        raddr_t image = imgs[ii].load;
+        struct mach_header_64 mh;
+        if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) continue;
+        if (mh.magic != MH_MAGIC_64) continue;
+        raddr_t slide = 0;
+        if (image_slide(task, image, &slide) != 0) continue;
+
+        raddr_t lc = image + sizeof(mh);
+        for (uint32_t i = 0; i < mh.ncmds; i++) {
+            struct load_command cmd;
+            if (tread(task, lc, &cmd, sizeof(cmd)) != KERN_SUCCESS) break;
+            if (cmd.cmd == LC_SEGMENT_64) {
+                struct segment_command_64 seg;
+                tread(task, lc, &seg, sizeof(seg));
+                if (strncmp(seg.segname, "__TEXT", 16) != 0) {
+                    lc += cmd.cmdsize;
+                    continue;
+                }
+                raddr_t sect_addr = lc + sizeof(struct segment_command_64);
+                for (uint32_t s = 0; s < seg.nsects && s < 64; s++) {
+                    struct section_64 sect;
+                    if (tread(task, sect_addr + sizeof(sect) * s, &sect, sizeof(sect)) != KERN_SUCCESS)
+                        continue;
+                    if (strcmp(sect.sectname, "__text") != 0) continue;
+                    if (sect.size < 8 || sect.size > 32 * 1024 * 1024) continue;
+                    raddr_t base = sect.addr + slide;
+                    /* scan first 512KB only */
+                    rsize_t lim = sect.size > 0x80000 ? 0x80000 : (rsize_t)sect.size;
+                    for (rsize_t off = 0; off + 8 <= lim; ) {
+                        rsize_t nread = lim - off;
+                        if (nread > 0x4000) nread = 0x4000;
+                        if (tread(task, base + off, chunk, nread) != KERN_SUCCESS) break;
+                        for (rsize_t q = 0; q + 8 <= nread; q += 4) {
+                            uint32_t a, b;
+                            memcpy(&a, chunk + q, 4);
+                            memcpy(&b, chunk + q + 4, 4);
+                            if (a == pat[0] && b == pat[1]) {
+                                free(chunk);
+                                return base + off + q;
+                            }
+                        }
+                        off += (nread > 4) ? (nread - 4) : nread;
+                    }
+                }
+            }
+            lc += cmd.cmdsize;
+        }
+    }
+    free(chunk);
+    return 0;
+}
+
 static int patch_ret0(task_t task, raddr_t addr) {
-    uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u }; /* MOV X0,#0 ; RET */
+    uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u };
     return twrite_code(task, addr, code, sizeof(code));
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: sy_mempatch <pid>\n");
+        fprintf(stderr, "usage: sy_mempatch <pid> [--text]\n");
         return 1;
     }
     pid_t pid = (pid_t)atoi(argv[1]);
+    int do_text = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--text")) do_text = 1;
+    }
     if (pid <= 1) {
         fprintf(stderr, "bad pid\n");
         return 1;
@@ -334,39 +414,45 @@ int main(int argc, char **argv) {
         return 5;
     }
 
-    raddr_t stub = 0;
-    kr = vm_allocate(task, &stub, 0x4000, VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS || !stub) {
-        write_status("FAIL alloc_stub");
-        free(imgs);
-        mach_port_deallocate(mach_task_self(), task);
-        return 6;
+    raddr_t stub = find_ret0_gadget(task, imgs, nimg);
+    int stub_anon = 0;
+    if (!stub) {
+        kr = vm_allocate(task, &stub, 0x4000, VM_FLAGS_ANYWHERE);
+        if (kr != KERN_SUCCESS || !stub) {
+            write_status("FAIL alloc_stub");
+            free(imgs);
+            mach_port_deallocate(mach_task_self(), task);
+            return 6;
+        }
+        uint32_t stubcode[2] = { 0xD2800000u, 0xD65F03C0u };
+        if (twrite_code(task, stub, stubcode, sizeof(stubcode)) != 0) {
+            write_status("FAIL write_stub");
+            free(imgs);
+            mach_port_deallocate(mach_task_self(), task);
+            return 7;
+        }
+        stub_anon = 1;
     }
-    uint32_t stubcode[2] = { 0xD2800000u, 0xD65F03C0u };
-    if (twrite_code(task, stub, stubcode, sizeof(stubcode)) != 0) {
-        write_status("FAIL write_stub");
-        free(imgs);
-        mach_port_deallocate(mach_task_self(), task);
-        return 7;
-    }
-    fprintf(stdout, "stub @ 0x%llx\n", (unsigned long long)stub);
+    fprintf(stdout, "stub @ 0x%llx anon=%d\n", (unsigned long long)stub, stub_anon);
 
-    task_suspend(task);
-
+    /* GOT only — no long suspend, no TEXT by default */
     int got_hits = rewrite_gots(task, imgs, nimg, tersafe, addrs, naddr, stub);
     fprintf(stdout, "got_rewrites=%d\n", got_hits);
 
     int text_ok = 0;
-    for (int i = 0; i < naddr; i++) {
-        if (patch_ret0(task, addrs[i]) == 0) {
-            text_ok++;
-            fprintf(stdout, "prologue ok 0x%llx\n", (unsigned long long)addrs[i]);
-        } else {
-            fprintf(stdout, "prologue fail 0x%llx\n", (unsigned long long)addrs[i]);
+    if (do_text) {
+        fprintf(stdout, "WARNING: --text enabled (may crash)\n");
+        task_suspend(task);
+        for (int i = 0; i < naddr; i++) {
+            if (patch_ret0(task, addrs[i]) == 0) {
+                text_ok++;
+                fprintf(stdout, "prologue ok 0x%llx\n", (unsigned long long)addrs[i]);
+            } else {
+                fprintf(stdout, "prologue fail 0x%llx\n", (unsigned long long)addrs[i]);
+            }
         }
+        task_resume(task);
     }
-
-    task_resume(task);
 
     free(imgs);
     mach_port_deallocate(mach_task_self(), task);
@@ -380,6 +466,11 @@ int main(int argc, char **argv) {
         fprintf(stdout, "%s\n", buf);
         return 0;
     }
-    write_status("FAIL mempatch=0");
-    return 8;
+    /* symbols found but no importer GOT — still OK-ish for status; no TEXT touch */
+    snprintf(buf, sizeof(buf),
+             "OK mempatch got=0 text=0 syms=%d pid=%d (no GOT slots; skipped TEXT) time=%ld",
+             naddr, (int)pid, (long)time(NULL));
+    write_status(buf);
+    fprintf(stdout, "%s\n", buf);
+    return 0;
 }

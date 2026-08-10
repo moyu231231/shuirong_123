@@ -156,7 +156,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "内存补丁完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "内存补丁成功"
-                    alertMsg = "无 dylib 远程补丁完成\n\(BuiltinInjector.lastTargetPath)\n\n未 dlopen、未改磁盘 LC。\n退游戏需重做。\n4013 仍靠网络层。"
+                    alertMsg = "无 dylib 远程补丁完成\n\(BuiltinInjector.lastTargetPath)\n\n只改 GOT，不改 tersafe 代码段（避免闪退）。\n退游戏需重做。\n4013 仍靠网络层。"
                     showAlert = true
                     reload()
                 }

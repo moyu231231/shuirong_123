@@ -14,8 +14,8 @@ struct MemoryStatusView: View {
             List {
                 Section("推荐：无 dylib 内存补丁") {
                     row("引擎", "sy_mempatch / task_for_pid")
-                    row("步骤", "GOT 改写 → 导出 prologue")
-                    row("特点", "不 dlopen、不落库、无新镜像")
+                    row("步骤", "只改 GOT（默认不改 TEXT）")
+                    row("特点", "不 dlopen、不落库、避免闪退")
                     row("延时", "40s+随机抖动")
                 }
                 Section("备选") {
