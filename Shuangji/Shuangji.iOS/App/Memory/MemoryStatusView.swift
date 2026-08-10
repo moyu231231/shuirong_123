@@ -12,12 +12,17 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("内存补丁（防闪退）") {
-                    row("引擎", "sy_mempatch / task_for_pid")
-                    row("A", "外层 GOT → ret0")
-                    row("B", "tersafe DATA 指针")
-                    row("C", "叶子 TEXT 默认关闭")
-                    row("延时", "45s+抖动")
+                Section("内存补丁") {
+                    row("DATA门闩", "COREREPORT enabled=0/checked=1（防延迟踢）")
+                    row("GOT", "外层导入 → tersafe/系统 ret0")
+                    row("OnRecv", "检测下发入口 TEXT ret0")
+                    row("GetReport", "TssSDKGetReportData* 薄导出 ret0")
+                    row("不做", "匿名 RX / COREREPORT TEXT（门闩够用时）/ 总闸")
+                }
+                Section("注意") {
+                    Text("延迟踢多半是上报积压后送出。门闩挡 COREREPORT；小火箭改修改模式仍要拦 send_cs/4013。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 Section("检查") {
                     Text(statusText)
@@ -60,8 +65,6 @@ struct MemoryStatusView: View {
                     statusText = "无状态\n请内存补丁后再查"
                 } else if body.hasPrefix("OK") {
                     statusText = "✅ \(body)"
-                } else if body.hasPrefix("WAIT") {
-                    statusText = "⏳ \(body)"
                 } else {
                     statusText = "❌ \(body)"
                 }

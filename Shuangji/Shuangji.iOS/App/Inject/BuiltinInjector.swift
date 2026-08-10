@@ -1,7 +1,7 @@
 import Foundation
 
-/// 默认：纯本地三层 mempatch（GOT + tersafe DATA + 叶子上报 RVA）。
-/// 不依赖网络 4013；不 dlopen，避免新镜像被扫。
+/// 默认 mempatch：DATA 门闩（COREREPORT）+ GOT + OnRecv/GetReport TEXT。
+/// 针对局内延迟踢；云端 4013 仍作 send_cs 兜底。不 dlopen。
 enum BuiltinInjector {
 
     /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名
@@ -72,8 +72,8 @@ enum BuiltinInjector {
         "libquic_migration.dylib"
     ]
 
-    /// 推荐：纯本地 A+B+C——干净启动 → 等 tersafe → sy_mempatch
-    static func memPatch(into app: AppEntry, settleSeconds: Int = 45) throws {
+    /// 内存补丁：干净启动 → 等 tersafe → DATA门闩 + GOT + OnRecv/GetReport
+    static func memPatch(into app: AppEntry, settleSeconds: Int = 55) throws {
         guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
         guard let mp = toolURL("sy_mempatch") else {
             throw InjectError.noTool("sy_mempatch（请重装新 tipa）")

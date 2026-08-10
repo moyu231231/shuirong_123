@@ -34,20 +34,30 @@ struct LoginView: View {
     private func login() {
         busy = true
         errorText = ""
-        // 强制使用内置中枢，不读/不展示用户可改地址
         cfg.accountHost = HubEndpoint.host
-        cfg.accountPort = HubEndpoint.port
+        cfg.accountPort = HubEndpoint.accountPort
+        cfg.host = HubEndpoint.host
+        cfg.socksPort = HubEndpoint.socksPort
+        cfg.enginePort = HubEndpoint.enginePort
+        cfg.workMode = 2
+        cfg.localInterceptEnabled = true
         cfg.save()
-        AccountHubAPI.auth(host: HubEndpoint.host, port: HubEndpoint.port,
+
+        AccountHubAPI.auth(host: HubEndpoint.host, port: HubEndpoint.accountPort,
                            user: cfg.userName, password: cfg.password) { result in
             DispatchQueue.main.async {
-                busy = false
                 switch result {
                 case .success(let r):
                     AuthSession.markLoggedIn(user: cfg.userName, token: r.token ?? "ok")
-                    cfg.save()
-                    onSuccess()
+                    // 静默把引擎切到「修改」——云端拦 4013
+                    EngineAPI.setMode(cfg: cfg, mode: 2) { _ in
+                        DispatchQueue.main.async {
+                            busy = false
+                            onSuccess()
+                        }
+                    }
                 case .failure(let e):
+                    busy = false
                     errorText = e.localizedDescription
                 }
             }

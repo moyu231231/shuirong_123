@@ -1,0 +1,190 @@
+水溶C · 本地 tersafe 实测分析 + GitHub ACE 专精对照
+更新：对照二进制 C:\Users\Administrator\Projects\IDA_Analysis\tersafe
+大小：2991952 (0x2DA750)  Mach-O 64  magic=FEEDFACF  filetype=MH_DYLIB
+版本锚点：v7.7.49.57576
+__TEXT.__text  VA 0x4B30..0x24938C
+__DATA.__data  VA 0x2A9BE0 size 0xD440
+__DATA.__bss   VA 0x2B8D90 size 0x11668  ← TDM 开关类全局量大概率在这里（需 IDA 跟 xref）
+
+【本机导出表实测 VA（nlist，可当 mempatch 锚点）】
+  TssSDKInit                 0xF9970
+  TssSDKGetReportData        0xF9A7C
+  TssSDKOnRecvData           0xF9AB4
+  TssSDKOnRecvSignature      0xF9B28
+  TssSDKDelReportData        0xF9A98
+  tss_get_report_data        0x1B6B8
+  tss_enable_get_report_data 0x1B608
+  tss_sdk_rcv_anti_data      0x1BA9C
+  tss_sdk_encryptpacket      0x1B7EC
+  tss_sdk_decryptpacket      0x1B94C
+  tss_sdk_ischeatpacket      0x1B6B0
+  tss_sdk_setuserinfo        0x20CEC
+  PluginTssSDKLifecycle      0x2A9A78 (ObjC)
+
+【现 mempatch 硬编码（需与上表核对）】
+  RVA_COREREPORT 0x3F284 / TDM 0x3E720 / route 0x3F48C / shell 0x100A20
+  ← 这些是内部函数，不在导出表；版本一变就废。导出表那一组更稳。
+
+================================================================
+一、先把话说死（为什么你会觉得我“糊弄”）
+================================================================
+1) 本机「状态 VPN」不劫持默认路由 → 根本不拦任何包。连上只是状态栏图标。
+2) 只改 GOT / 少量导出 → 只挡「游戏经导入表调用」的路径。
+   tersafe 内部 BL → COREREPORT → send_cs/send_gs 完全不受影响。
+3) ACE/TSS 是「行为+上报+服务端画像」，不是「改一个函数就无敌」。
+   专精仓库共识：单点 RET 过不了；要杀扫描器注册 / TDM / 杀进程路径 / 上报通道 多层。
+
+所以：补丁“成功”≠过检。过检要同时切断「检测结果产生」和「结果送出」。
+
+================================================================
+二、本地 tersafe 字符串硬证据（刚扫的）
+================================================================
+【上报出口】
+  COREREPORT                         @ 0x286D28
+  send_cs:%d, send_gs:%d, remain_cnt @ 0x2876BA / 0x2876C6
+  shell_report / tdm_report / REPORT
+  enable_get_report_data / get_report_data
+  _tss_get_report_data{,2,3,4}
+  _TssSDKGetReportData{,2,3,4}
+  _TssSDKDelReportData*
+
+【检测下发 / 收包】
+  _TssSDKOnRecvData
+  _TssSDKOnRecvSignature
+  _tss_sdk_rcv_anti_data
+  cv_anti_data / free_anti_data / _tp2_free_anti_data
+
+【自检 / 会咬我们自己补丁的】
+  bin_patch_cnt:%d                   @ 0x28941D   ← TEXT 补丁计数
+  inline_hook_opcode_dismatch        @ 0x28A027   ← 内联钩子 opcode 不一致
+  ms_data_crc
+  @_vm_region_64 / @_mach_vm_region_recurse  ← 扫内存映射（匿名 RX/注入必现）
+
+【通道 / 加解密】
+  DoConnCSChannelImp, %s:%d          ← CS 通道
+  _tss_sdk_encryptpacket / decryptpacket
+  _tss_sdk_ischeatpacket
+  init_info->tss_sdk_send_data_to_svr:%p  ← GS 回调：报告塞进游戏连接
+
+【扫描线程相关（C++ RTTI 名）】
+  N5MRPCS15CFastScanThreadE
+  N5MRPCS13CMrpcsMonitorE
+  N5MRPCS6CMrpcsE / CMrpcsMgr …
+
+结论（对 iOS 这颗 so）：
+  A. 举报/异常 ≠ 只有 4013。至少 send_cs（CS/65010）+ send_gs（游戏服回调）。
+  B. 改 TEXT 会撞 bin_patch / inline_hook_opcode_dismatch → 闪退或加风险分。
+  C. 匿名可执行页 / 新 dylib → vm_region 扫得到。
+  D. 真正该打的枢纽是：COREREPORT / TDM / send 路径 / OnRecv；
+     以及「别让扫描器先记一笔再上报」。
+
+================================================================
+三、和我们现有代码的对照
+================================================================
+现 sy_mempatch（已按延迟踢加固）：
+  ✓ DATA Tier2：BSS 0x2B8F58=0 / 0x2B8F59=1
+     COREREPORT @0x3F2AC 读这两字节；enabled==0 → return 0
+     （对标 ACE-ANTICHEAT g_tdm_report_enabled/checked，不改 COREREPORT TEXT）
+  ✓ GOT → 优先 tersafe 内 ret0 gadget，再系统库
+  ✓ OnRecv / rcv_anti_data / OnRecvSignature TEXT ret0
+  ✓ TssSDKGetReportData* 薄导出 TEXT ret0（挡游戏轮询→send_gs）
+  ✓ COREREPORT TEXT 仅作 DATA 失败时的 fallback
+  ✗ 没动 MRPCS 扫描线程 / bin_patch 扫描器本身
+  ✗ 状态 VPN 不拦包；send_cs 仍靠云端 4013
+
+现网关 4013：
+  ✓ 只能挡 send_cs 线上可见的 33 66…40 13
+  ✗ 挡不住 send_gs（靠上面 GetReport 空返回减轻）
+
+================================================================
+四、GitHub 上「专精 ACE」可借用的仓库（研究向）
+================================================================
+【强烈推荐读】
+1) msantiagodev/ACE-ANTICHEAT
+   https://github.com/msantiagodev/ACE-ANTICHEAT
+   Android libanogs/libanort 全景笔记（~100 md）。
+   核心结论可直接映射到我们：
+     · 检测在「扫描器」；上报在 TDM/COREREPORT
+     · 多层：杀 scanner 注册 / 关 TDM / 挡 kill 路径 / 挡远端规则下发
+     · 单点 patch 不够；见 73_bypass_status_audit.md / 00_TLDR_FULL_SYSTEM.md
+   注意：偏移是 Android 某版本，不能照抄到 iOS tersafe RVA，学的是「架构」。
+
+2) arx-oioi/-AntiCheat-Anogs-Tencent-
+   https://github.com/arx-oioi/-AntiCheat-Anogs-Tencent-
+   ANO/GP/TSS/ACE 分层说明：环境行为画像、延迟 ban、内存痕迹即风险。
+
+3) silentninjabee/ACE-Anticheat-SDK-Documentation
+   https://github.com/silentninjabee/ACE-Anticheat-SDK-Documentation
+   官方/半官方 SDK 接入文档镜像（iOS/Android API 面：init/setuserinfo/getreport…）
+
+4) wwweeeqqu/honor-of-kings-RE-research（及 divarvian 同源）
+   https://github.com/wwweeeqqu/honor-of-kings-RE-research
+   王者 ACE：maps 痕迹、闪退真相、内核读内存思路（Android）。
+   对我们启示：很多「秒检」是环境/maps/注入痕迹，不是业务数值。
+
+【PC ACE，参考价值有限】
+5) MoYuanzheng/FuckTencentACE —— Windows SGuard 限流，不是手游 tersafe
+6) keiko233/tencent-ace-tools —— PC 工具向
+
+【可借鉴的工程组件（非 ACE 本体）】
+7) heiher/hev-socks5-tunnel —— 真要本机 VPN 拦包必须嵌这类转发栈
+8) opa334/opainject —— 动态注入（我们已用；新镜像易被扫）
+
+================================================================
+五、按 ACE 专精仓库对齐后的正确优先级（iOS）
+================================================================
+P0 上报出不去（否则扫到了一定会画像）
+  · 云端 Gateway 修改模式拦 65010/4013（send_cs）
+  · 内存侧打断 COREREPORT / get_report 取数 / send_gs 回调
+  · 小火箭必须真走网关，不是状态 VPN
+
+P1 检测结果少产生（搞事时基础检测）
+  · OnRecv / rcv_anti_data 空掉（少吃检测任务）
+  · 尽量不留：匿名 RX、新 dylib 名、磁盘 LC、过多 TEXT 补丁
+  · 参考 Android：杀 scanner 注册 / 关 TDM 开关 —— iOS 需在 so 里找等价全局量
+
+P2 别被自杀
+  · 不碰 0x10E36C 总闸瞎 RET（已验证易崩）
+  · TEXT 补丁前校验 prologue；版本不对就跳过
+
+P3 长期
+  · 用 IDA 在本地 tersafe 定位：
+      tdm_report / COREREPORT 提交函数
+      g_tdm 类开关（对照 ACE-ANTICHEAT Tier2）
+      send_gs 回调槽（tss_sdk_send_data_to_svr）
+      MRPCS FastScanThread 启动点
+
+================================================================
+六、下一步建议（别再瞎加开关）
+================================================================
+1. 服务器确认：Account:9100 + Gateway:1080 + Engine「修改」都在跑
+2. 手机：小火箭导入节点并全局代理（不要只靠 App 里状态 VPN）
+3. 内存补丁后看 status：要有 recv>0 或 leaf>0；got 可为 0
+4. 若仍秒检：把「是进游戏就踢 / 进局踢 / 延迟踢」说清 + 抓一局上行 send dump
+   用来对 send_gs 特征（目前最大缺口）
+
+================================================================
+七、把 Android ACE 8 层映射到我们这颗 iOS tersafe
+================================================================
+Android (ACE-ANTICHEAT)          |  iOS tersafe (本机实测)
+---------------------------------+--------------------------------
+ace_register_scanner_module      |  MRPCS CFastScanThread / 扫描器注册
+                                 |  （字符串有 RTTI，函数未导出）
+g_tdm_report_enabled 两字节      |  DATA/BSS 里同类开关（需 xref tdm_report）
+ace_submit_corereport            |  COREREPORT @内部 0x3F284 + 串 0x286D28
+                                 |  REMOTECONFIG @ 0x286D3F（同簇）
+AnoSDK getreport / delreport     |  导出 TssSDKGetReportData@0xF9A7C 等
+senddatatosdk / OnRecv           |  TssSDKOnRecvData@0xF9AB4
+                                 |  tss_sdk_rcv_anti_data@0x1BA9C
+senddatatosvr (GS 夹带)          |  tss_sdk_send_data_to_svr 串@0x289AA9
+                                 |  + send_cs/send_gs 计数串
+ConfigUpdateFromServer           |  DoConnCSChannel + REMOTECONFIG
+VM / inline relocator            |  bin_patch_cnt / inline_hook_opcode_dismatch
+RWX / maps 扫描                  |  @_vm_region_64 / mach_vm_region_recurse
+
+专精仓库真正在做的是「多层同时关」；
+我们现在大约只覆盖了他们的 Tier2 半截（COREREPORT TEXT）+ OnRecv，
+缺 Tier1（扫器注册）和 DATA 开关，以及 GS 出口。
+
+TEXT 里现成 ret0 小工具有 37 处（MOV X0,#0; RET）——GOT 改写应优先用 so 内 gadget，
+不一定非要去系统库找。

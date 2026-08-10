@@ -37,7 +37,7 @@ public struct AppConfig: Codable, Equatable {
         enginePort: 8088,
         userName: "",
         password: "",
-        workMode: 3,
+        workMode: 2,
         blockUplink4013: true,
         blockDownlinkDetect: true,
         blockNjReport0E: true,

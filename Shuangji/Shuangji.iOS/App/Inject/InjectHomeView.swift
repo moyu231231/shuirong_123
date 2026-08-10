@@ -88,7 +88,7 @@ struct InjectHomeView: View {
                                     ProgressView()
                                 } else {
                                     Menu {
-                                        Button("内存补丁（推荐）") { memPatch(app) }
+                                        Button("内存补丁（推荐·防延迟踢）") { memPatch(app) }
                                         Button("打开游戏") { launch(app.bundleID) }
                                         Button("动态注入（备选）") { runtimeInject(app) }
                                         if app.isInjected {
@@ -151,12 +151,12 @@ struct InjectHomeView: View {
         banner = "纯本地补丁：启动 → 等 tersafe → GOT/DATA/叶子上报…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try BuiltinInjector.memPatch(into: app, settleSeconds: 45)
+                try BuiltinInjector.memPatch(into: app, settleSeconds: 55)
                 DispatchQueue.main.async {
                     busyID = nil
                     banner = "内存补丁完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "内存补丁成功"
-                    alertMsg = "内存补丁完成\n\(BuiltinInjector.lastTargetPath)\n\n仅 GOT+DATA（已关叶子 TEXT，防闪退）。\n退游戏需重做。到「内存」页查看状态。"
+                    alertMsg = "内存补丁完成\n\(BuiltinInjector.lastTargetPath)\n\nGOT + OnRecv + COREREPORT。\n还须：链路里切修改模式 + 小火箭走云端网关，否则仍会被检测上报。\n退游戏需重做。"
                     showAlert = true
                     reload()
                 }
