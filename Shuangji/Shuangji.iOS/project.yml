@@ -1,0 +1,85 @@
+name: Shuiyong
+options:
+  bundleIdPrefix: com.shuiyong
+  deploymentTarget:
+    iOS: "14.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.shuiyong.ports
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_BITCODE: NO
+
+targets:
+  Shuiyong:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+      - path: Resources
+        type: folder
+        buildPhase: resources
+        optional: true
+    settings:
+      base:
+        INFOPLIST_GENERATION_MODE: Generated
+        PRODUCT_NAME: 水溶C
+        PRODUCT_BUNDLE_IDENTIFIER: com.shuiyong.ports
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: 水溶C
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        CODE_SIGN_ENTITLEMENTS: entitlements/App.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+    dependencies:
+      - target: ShuiyongTunnel
+        embed: true
+      - target: ShuiyongMem
+
+  ShuiyongTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Tunnel
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: ShuiyongTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: com.shuiyong.ports.tunnel
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: 链路
+        INFOPLIST_KEY_NSExtension_NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+        INFOPLIST_KEY_NSExtension_NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+        CODE_SIGN_ENTITLEMENTS: entitlements/Tunnel.entitlements
+
+  ShuiyongMem:
+    type: library.dynamic
+    platform: iOS
+    sources:
+      - path: MemDylib
+        excludes:
+          - README.md
+    settings:
+      base:
+        PRODUCT_NAME: ShuiyongMem
+        PRODUCT_BUNDLE_IDENTIFIER: com.shuiyong.ports.mem
+        EXECUTABLE_PREFIX: ""
+        MACH_O_TYPE: mh_dylib
+        DYLIB_INSTALL_NAME_BASE: "@rpath"
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: YES
+        CLANG_ENABLE_MODULES: YES
+        OTHER_LDFLAGS:
+          - "-framework"
+          - Foundation
+          - "-lpthread"

@@ -1,0 +1,4 @@
+已废弃手搓步骤。请看同目录「打包.txt」。
+
+Mac:   ./package.sh
+Win:   GitHub Actions 下载 tipa

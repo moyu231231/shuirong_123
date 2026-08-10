@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>水溶C端口</title>
+<style>
+:root{--bg:#0f1419;--card:#1a2332;--line:#2a3a4f;--text:#e7eef8;--mut:#8aa0b8;--acc:#3d8bfd;--ok:#3dd68c;--warn:#ffb020;--bad:#ff6b6b}
+*{box-sizing:border-box}body{margin:0;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:linear-gradient(160deg,#0b1020,#152238 50%,#0f1419);color:var(--text);min-height:100vh}
+.wrap{max-width:720px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:28px;margin:0 0 22px;letter-spacing:.5px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:6px}
+input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#0e1622;color:var(--text);outline:none}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+button{border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer;color:#fff}
+.b1{background:var(--acc)}.b2{background:#5b6cff}.b3{background:var(--ok);color:#062}.b4{background:var(--warn);color:#3a2500}.b5{background:var(--bad)}.b6{background:#2a9d8f}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+.on{background:rgba(61,214,140,.15);color:var(--ok)}
+.off{background:rgba(255,107,107,.12);color:var(--bad)}
+.msg{margin-top:12px;font-size:18px;font-weight:700;color:var(--ok);min-height:28px}
+.okline{margin-top:16px;padding:16px;border-radius:12px;background:#101a28;border:1px solid var(--line);font-size:22px;font-weight:700;color:var(--ok);text-align:center}
+@media(max-width:700px){.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>水溶C端口</h1>
+
+  <div class="card" id="loginCard">
+    <div class="row">
+      <div><label>账号</label><input id="user" placeholder="账号" autocomplete="username"/></div>
+      <div><label>密码</label><input id="pass" type="password" placeholder="密码" autocomplete="current-password"/></div>
+    </div>
+    <div class="btns">
+      <button class="b1" onclick="login()">登录</button>
+    </div>
+    <div class="msg" id="loginMsg"></div>
+  </div>
+
+  <div class="card" id="panel" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>当前用户：<b id="who"></b> <span id="modeBadge" class="badge off">待机</span></div>
+      <div class="btns" style="margin:0">
+        <button class="b3" onclick="setMode(1)">读取模式</button>
+        <button class="b4" onclick="setMode(2)">修改模式</button>
+        <button class="b6" onclick="setMode(3)">大厅</button>
+        <button class="b2" onclick="setMode(0)">待机</button>
+        <button class="b5" onclick="resetPool()">重置数据池</button>
+      </div>
+    </div>
+    <div class="okline" id="connLine">异常重新走流程</div>
+  </div>
+</div>
+<script>
+const LS_USER='shuangji_user', LS_PASS='shuangji_pass';
+let USER='', PASS='';
+const modeName={0:'待机',1:'读取模式',2:'修改模式',3:'大厅'};
+(function loadCache(){
+  try{
+    const u=localStorage.getItem(LS_USER)||'';
+    const p=localStorage.getItem(LS_PASS)||'';
+    if(u) document.getElementById('user').value=u;
+    if(p) document.getElementById('pass').value=p;
+  }catch(e){}
+})();
+async function api(path, body){
+  const opt={method: body?'POST':'GET', headers:{'Content-Type':'application/json'}};
+  if(body) opt.body=JSON.stringify(body);
+  const r=await fetch(path,opt);
+  return await r.json();
+}
+async function login(){
+  USER=document.getElementById('user').value.trim();
+  PASS=document.getElementById('pass').value;
+  const res=await api('/api/login',{UserName:USER,Password:PASS});
+  if(res.ok||res.Ok){
+    try{
+      localStorage.setItem(LS_USER, USER);
+      localStorage.setItem(LS_PASS, PASS);
+    }catch(e){}
+    document.getElementById('loginCard').style.display='none';
+    document.getElementById('panel').style.display='block';
+    document.getElementById('who').textContent=USER;
+    document.getElementById('loginMsg').textContent='';
+    refresh();
+    setInterval(refresh, 1500);
+  }else{
+    document.getElementById('loginMsg').style.color='#ff6b6b';
+    document.getElementById('loginMsg').textContent=res.message||res.Message||'登录失败';
+  }
+}
+async function setMode(m){
+  const res=await api('/api/mode',{UserName:USER,Password:PASS,Mode:m});
+  if(!(res.ok||res.Ok)){
+    const line=document.getElementById('connLine');
+    line.textContent=res.message||res.Message||'异常重新走流程';
+    line.style.color='#ff6b6b';
+  }
+  refresh();
+}
+async function resetPool(){
+  if(!confirm('确定重置数据池？'))return;
+  await api('/api/reset',{UserName:USER,Password:PASS});
+  refresh();
+}
+async function refresh(){
+  if(!USER)return;
+  const st=await api('/api/status?user='+encodeURIComponent(USER)+'&pass='+encodeURIComponent(PASS));
+  if(!(st.ok||st.Ok))return;
+  const s=st.data||st;
+  const m=s.Mode??s.mode??0;
+  const badge=document.getElementById('modeBadge');
+  badge.textContent=modeName[m]||m;
+  badge.className='badge '+(m===0?'off':'on');
+  const n=s.PoolCount??s.poolCount??0;
+  const line=document.getElementById('connLine');
+  const text=s.ReadyText||s.readyText||(n>0?'连接成功':'异常重新走流程');
+  line.textContent=text;
+  line.style.color=(n>0)?'#3dd68c':'#ff6b6b';
+}
+</script>
+</body>
+</html>

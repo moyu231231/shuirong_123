@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# 一键出 tipa： ./package.sh
+# 依赖：Xcode + brew(xcodegen, ldid)  —— 脚本会尝试自动 brew install
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+OUT="$ROOT/dist"
+APP_NAME="水溶C"
+BUNDLE_ID="com.shuiyong.ports"
+DERIVED="$ROOT/.build"
+SDK="${SDK:-iphoneos}"
+
+echo "==> [1/6] 检查工具"
+if ! command -v xcodebuild >/dev/null; then
+  echo "需要 Xcode 命令行工具"; exit 1
+fi
+if ! command -v xcodegen >/dev/null; then
+  echo "安装 xcodegen..."
+  brew install xcodegen
+fi
+if ! command -v ldid >/dev/null; then
+  echo "安装 ldid..."
+  brew install ldid || brew install ldid-procursus || true
+fi
+if ! command -v ldid >/dev/null; then
+  echo "请先安装 ldid: brew install ldid"; exit 1
+fi
+
+echo "==> [2/6] 生成工程"
+xcodegen generate --spec project.yml
+
+echo "==> [3/6] 编译 App + dylib + Tunnel"
+rm -rf "$DERIVED"
+xcodebuild \
+  -project Shuiyong.xcodeproj \
+  -scheme Shuiyong \
+  -configuration Release \
+  -sdk "$SDK" \
+  -derivedDataPath "$DERIVED" \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY="" \
+  build
+
+APP_PATH="$(find "$DERIVED/Build/Products" -name '*.app' -maxdepth 3 | head -n1)"
+if [[ -z "$APP_PATH" ]]; then
+  echo "找不到 .app"; exit 1
+fi
+echo "APP=$APP_PATH"
+
+echo "==> [4/6] 编 syinject 并塞进 App"
+mkdir -p "$APP_PATH"
+clang -arch arm64 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+  -miphoneos-version-min=14.0 -O2 \
+  -o "$APP_PATH/syinject" "$ROOT/Tools/syinject.c"
+# 把 dylib 放进资源（注入器用）
+DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
+if [[ -n "$DYLIB" ]]; then
+  cp -f "$DYLIB" "$APP_PATH/ShuiyongMem.dylib"
+  mkdir -p "$APP_PATH/Frameworks"
+  cp -f "$DYLIB" "$APP_PATH/Frameworks/ShuiyongMem.dylib" || true
+fi
+
+echo "==> [5/6] ldid 伪签"
+ENT_APP="$ROOT/entitlements/App.entitlements"
+ENT_TUN="$ROOT/entitlements/Tunnel.entitlements"
+# 主程序
+MAIN_BIN="$APP_PATH/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist" 2>/dev/null || echo Shuiyong)"
+[[ -f "$MAIN_BIN" ]] || MAIN_BIN="$(find "$APP_PATH" -maxdepth 1 -type f -perm -111 | head -n1)"
+ldid -S"$ENT_APP" "$MAIN_BIN"
+ldid -S"$ENT_APP" "$APP_PATH/syinject" 2>/dev/null || ldid -S "$APP_PATH/syinject" || true
+[[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
+# 扩展
+EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"
+if [[ -n "$EXT" ]]; then
+  EXT_BIN="$EXT/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+  ldid -S"$ENT_TUN" "$EXT_BIN" || ldid -S"$ENT_APP" "$EXT_BIN"
+fi
+rm -rf "$APP_PATH/_CodeSignature" "$APP_PATH/embedded.mobileprovision" || true
+
+echo "==> [6/6] 打 tipa"
+rm -rf "$OUT/Payload" "$OUT/${APP_NAME}.tipa"
+mkdir -p "$OUT/Payload"
+cp -R "$APP_PATH" "$OUT/Payload/${APP_NAME}.app"
+(
+  cd "$OUT"
+  zip -qr "${APP_NAME}.tipa" Payload
+  rm -rf Payload
+)
+ls -lh "$OUT/${APP_NAME}.tipa"
+echo ""
+echo "完成: $OUT/${APP_NAME}.tipa"
+echo "用 TrollStore 安装即可。"

@@ -1,0 +1,35 @@
+name: 水溶C tipa
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Shuangji/Shuangji.iOS/**"
+      - ".github/workflows/shuiyong-tipa.yml"
+
+jobs:
+  tipa:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: Shuangji/Shuangji.iOS
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          brew list ldid >/dev/null 2>&1 || brew install ldid || brew install ldid-procursus || true
+          which ldid || (echo "ldid missing" && exit 1)
+
+      - name: Package
+        run: |
+          chmod +x package.sh
+          ./package.sh
+
+      - name: Upload tipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: shuiyong-tipa
+          path: Shuangji/Shuangji.iOS/dist/*.tipa
+          if-no-files-found: error

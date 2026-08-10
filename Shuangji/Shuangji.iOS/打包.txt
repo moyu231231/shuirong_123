@@ -1,0 +1,12 @@
+水溶C · 打包
+============
+
+没有 Mac → 必看同目录「无Mac打包详解.txt」
+（推 GitHub → Actions 点一下 → 下载 tipa）
+
+有 Mac → 终端执行：
+  cd Shuangji/Shuangji.iOS
+  chmod +x package.sh && ./package.sh
+产物：dist/水溶C.tipa
+
+Windows 双击 package.cmd 会打开无 Mac 说明，不会本地编译。

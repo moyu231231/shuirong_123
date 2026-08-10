@@ -1,0 +1,124 @@
+水溶C · 没有 Mac 怎么打包（详解）
+================================
+
+结论：Windows 本机编不了 iOS。用 GitHub 免费的 macos 云主机替你编，
+你只负责「推代码 → 点一下 → 下载 tipa」。
+
+
+────────────────────────────────
+一、准备（做一次）
+────────────────────────────────
+
+1) 注册 GitHub
+   https://github.com/signup
+
+2) 本机安装 Git（若还没有）
+   https://git-scm.com/download/win
+
+3) （可选）安装 GitHub CLI，方便命令行下载产物
+   https://cli.github.com/
+   安装后打开 PowerShell 执行：  gh auth login
+
+
+────────────────────────────────
+二、把工程推到 GitHub
+────────────────────────────────
+
+若仓库还没有远程：
+
+  cd C:\Users\Administrator\Desktop\WinsockPacketEditor-master
+  git status
+
+  # 若还没 init / 没 remote，按你自己的仓来。示例：
+  # 先在网页新建一个空仓库（不要勾 README）
+  # 然后：
+
+  git add Shuangji/Shuangji.iOS .github/workflows/shuiyong-tipa.yml
+  git commit -m "add shuiyong ios package workflow"
+  git branch -M main
+  git remote add origin https://github.com/你的用户名/你的仓库名.git
+  git push -u origin main
+
+若已经有远程，改完 iOS 相关后：
+
+  git add Shuangji/Shuangji.iOS .github/workflows/shuiyong-tipa.yml
+  git commit -m "update ios package"
+  git push
+
+
+────────────────────────────────
+三、网页点 Actions 打包（主力）
+────────────────────────────────
+
+1) 浏览器打开你的仓库
+2) 顶栏点 「Actions」
+3) 左侧点 「水溶C tipa」
+4) 右侧 「Run workflow」→ 选 main → 绿色 「Run workflow」
+5) 等 5～15 分钟（第一次可能更久，要装 brew 依赖）
+6) 点进这次运行记录
+7) 拉到最下面 「Artifacts」
+8) 下载 「shuiyong-tipa」
+9) 解压 zip，得到 「水溶C.tipa」
+
+
+常见问题：
+- Actions 是灰的 / 没有菜单  
+  仓库 Settings → Actions → General → 允许 Actions
+- 失败：xcodegen / ldid  
+  打开失败那次日志，把报错贴给开发者；多数是网络装 brew 超时，再点一次 Run 即可
+- 私有仓库  
+  免费额度够个人偶尔打包；别开特别频繁就行
+
+
+────────────────────────────────
+四、用命令行下载产物（可选）
+────────────────────────────────
+
+  gh run list --workflow=shuiyong-tipa.yml --limit 5
+  gh run download <RUN_ID> -n shuiyong-tipa
+
+会在当前目录得到 tipa。
+
+
+────────────────────────────────
+五、装到手机（依然不需要 Mac）
+────────────────────────────────
+
+1) 手机已装 TrollStore（巨魔）
+2) 把 水溶C.tipa 传到手机（隔空投送/网盘/爱思助手/线传均可）
+3) 用 TrollStore → 安装
+4) 打开 App：注入游戏 → 链路填双机 IP
+
+
+────────────────────────────────
+六、证书 / 双机（和打包无关）
+────────────────────────────────
+
+- PC 上跑 水溶C端口 / Shuangji，手机同一 WiFi
+- Gateway 导出 shuangji-ca.cer → 手机安装并「完全信任」
+- 链路里填电脑局域网 IP、账号密码
+
+
+────────────────────────────────
+七、没有 GitHub 怎么办
+────────────────────────────────
+
+备选（都要花钱或借机器，一般不推荐）：
+
+A) 租云 Mac（MacStadium / AWS EC2 Mac / 国内云桌面）
+   远程连上后执行：
+     cd Shuangji/Shuangji.iOS && ./package.sh
+
+B) 找有 Mac 的朋友，把整个 Shuangji.iOS 文件夹发过去，让对方跑 package.sh，
+   只要回传 dist/水溶C.tipa
+
+C) 自己买二手 Mac mini（一次投入，长期本地 ./package.sh）
+
+
+────────────────────────────────
+八、你要记住的最短路径
+────────────────────────────────
+
+  推代码 → Actions 点 Run → 下 tipa → TrollStore 装
+
+Windows 上双击 package.cmd 只会弹出这段说明，不会本地编译。
