@@ -4,34 +4,31 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                HStack {
-                    Text("库")
-                    Spacer()
-                    Text(BuiltinInjector.dylibFileName).foregroundColor(.secondary)
+                Section("当前策略") {
+                    row("库", BuiltinInjector.dylibFileName)
+                    row("取数", "get_report* → 空")
+                    row("发送", "send/sendto 吞 4013")
+                    row("开关", "enable_get_report 禁用")
+                    row("入站", "不补丁 rcv_anti（防闪）")
                 }
-                HStack {
-                    Text("线程")
-                    Spacer()
-                    Text("脉冲挂起").foregroundColor(.secondary)
-                }
-                HStack {
-                    Text("取数")
-                    Spacer()
-                    Text("清空").foregroundColor(.secondary)
-                }
-                HStack {
-                    Text("发送")
-                    Spacer()
-                    Text("特征过滤").foregroundColor(.secondary)
-                }
-                HStack {
-                    Text("加密")
-                    Spacer()
-                    Text("输出置零").foregroundColor(.secondary)
+                Section("成功标志") {
+                    Text("注入成功：本 App 弹窗「注入成功」")
+                        .font(.footnote)
+                    Text("钩子成功：进游戏后弹「水溶C / 内存钩子已生效」")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
                 }
             }
             .navigationTitle("内存")
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private func row(_ k: String, _ v: String) -> some View {
+        HStack {
+            Text(k)
+            Spacer()
+            Text(v).foregroundColor(.secondary).multilineTextAlignment(.trailing)
+        }
     }
 }

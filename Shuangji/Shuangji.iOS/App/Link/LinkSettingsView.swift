@@ -5,7 +5,9 @@ struct LinkSettingsView: View {
     @State private var cfg = AppConfig.load()
     @State private var vpnState = ""
     @State private var info = ""
+    @State private var modeLabel = "—"
     @State private var busy = false
+    @State private var currentMode = -1
 
     var body: some View {
         NavigationView {
@@ -23,8 +25,27 @@ struct LinkSettingsView: View {
                     SecureField("密码", text: $cfg.password)
                 }
 
+                Section(header: Text("工作模式"), footer: Text("举报/异常上报只在「修改」模式拦 65010。上号用读取→大厅，进局点修改。")) {
+                    modeButton(title: "读取", subtitle: "收绿样本", tag: 1)
+                    modeButton(title: "大厅", subtitle: "只洗 NJ，放行 65010", tag: 3)
+                    modeButton(title: "修改", subtitle: "局内：拦举报/异常上报", tag: 2)
+                    modeButton(title: "待机", subtitle: "全放行", tag: 0)
+                    Button("重置数据池") { reset() }.disabled(busy)
+                    Text("当前：\(modeLabel)")
+                        .font(.footnote)
+                        .foregroundColor(currentMode == 2 ? .green : .secondary)
+                    if !info.isEmpty {
+                        Text(info)
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    }
+                    Text("绿读不到时：确认「经节点转发」+ 小火箭/隧道走本机 SOCKS，点读取后再上号。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
                 Section("隧道") {
-                    Toggle("上行过滤", isOn: $cfg.blockUplink4013)
+                    Toggle("上行过滤(4013)", isOn: $cfg.blockUplink4013)
                     Toggle("异常包过滤", isOn: $cfg.blockNjReport0E)
                     Toggle("标记清洗", isOn: $cfg.neuterNjMarkers)
                     Toggle("经节点转发", isOn: $cfg.useUpstreamSocks)
@@ -38,17 +59,6 @@ struct LinkSettingsView: View {
                     Button("连接") { startVPN() }
                     Button("断开") { stopVPN() }
                 }
-
-                Section("模式") {
-                    Button("读取") { mode(1) }.disabled(busy)
-                    Button("大厅") { mode(3) }.disabled(busy)
-                    Button("局内") { mode(2) }.disabled(busy)
-                    Button("待机") { mode(0) }.disabled(busy)
-                    Button("重置") { reset() }.disabled(busy)
-                    if !info.isEmpty {
-                        Text(info).font(.footnote).foregroundColor(.secondary)
-                    }
-                }
             }
             .navigationTitle("链路")
             .onAppear { refresh() }
@@ -56,13 +66,40 @@ struct LinkSettingsView: View {
         .navigationViewStyle(.stack)
     }
 
-    private func mode(_ m: Int) {
+    @ViewBuilder
+    private func modeButton(title: String, subtitle: String, tag: Int) -> some View {
+        Button {
+            setMode(tag)
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline)
+                    Text(subtitle).font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                if currentMode == tag {
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(.accentColor)
+                }
+            }
+        }
+        .disabled(busy)
+    }
+
+    private func setMode(_ m: Int) {
         busy = true
         cfg.save()
+        info = "切换中…"
         EngineAPI.setMode(cfg: cfg, mode: m) { r in
             DispatchQueue.main.async {
                 busy = false
-                info = (try? r.get()).map { _ in "OK" } ?? "失败"
+                switch r {
+                case .success(let msg):
+                    currentMode = m
+                    modeLabel = EngineAPI.modeName(m)
+                    info = msg
+                case .failure(let e):
+                    info = e.localizedDescription
+                }
                 refresh()
             }
         }
@@ -73,7 +110,11 @@ struct LinkSettingsView: View {
         EngineAPI.reset(cfg: cfg) { r in
             DispatchQueue.main.async {
                 busy = false
-                info = (try? r.get()).map { _ in "OK" } ?? "失败"
+                switch r {
+                case .success(let msg): info = msg
+                case .failure(let e): info = e.localizedDescription
+                }
+                refresh()
             }
         }
     }
@@ -82,7 +123,14 @@ struct LinkSettingsView: View {
         EngineAPI.status(cfg: cfg) { r in
             DispatchQueue.main.async {
                 if case .success(let s) = r {
-                    info = "m=\(s.Mode ?? -1) p=\(s.PoolCount ?? 0) x=\(s.BoostInterceptCount ?? 0)"
+                    let m = s.Mode ?? -1
+                    currentMode = m
+                    let pool = s.PoolCount ?? 0
+                    let x = s.BoostInterceptCount ?? 0
+                    modeLabel = "\(EngineAPI.modeName(m))  绿=\(pool) 拦=\(x)"
+                    if info.isEmpty || info == "切换中…" {
+                        info = s.ReadyText ?? ""
+                    }
                 }
             }
         }

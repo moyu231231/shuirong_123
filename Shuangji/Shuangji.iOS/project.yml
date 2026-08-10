@@ -84,6 +84,8 @@ targets:
         OTHER_LDFLAGS:
           - "-framework"
           - Foundation
+          - "-framework"
+          - UIKit
           - "-lpthread"
 
 schemes:

@@ -98,8 +98,13 @@ namespace Shuangji.Common
             lock (st.Lock)
             {
                 SaveLocked(user, st);
-                // 离开读取模式且已有下行样本 → 冻结绿色（禁止二次读取污染）
-                if (st.Mode == WorkMode.Collect && mode != WorkMode.Collect)
+                // 再次点「读取」：解冻以便重收绿
+                if (mode == WorkMode.Collect)
+                {
+                    st.GreenFrozen = false;
+                }
+                // 离开读取模式且已有下行样本 → 冻结绿色
+                else if (st.Mode == WorkMode.Collect && mode != WorkMode.Collect)
                 {
                     if (st.Pool.Any(p => p.Downlink) || st.Pool65010.Count > 0)
                         st.GreenFrozen = true;
@@ -126,7 +131,13 @@ namespace Shuangji.Common
         public int GetDownlinkPoolCount(string user)
         {
             var st = Get(user);
-            lock (st.Lock) return st.Pool.Count(p => p.Downlink);
+            lock (st.Lock)
+            {
+                // NJ 下行池 + 65010 下行样本都算「有绿」，避免只收到 65010 却一直 Ready=false
+                int nj = st.Pool.Count(p => p.Downlink);
+                int p65 = st.Pool65010.Count(p => p.Downlink);
+                return nj + p65;
+            }
         }
 
         public void SetBoost(string user, bool enabled)
@@ -170,15 +181,25 @@ namespace Shuangji.Common
             var st = Get(user);
             lock (st.Lock)
             {
-                int downCnt = st.Pool.Count(p => p.Downlink);
-                bool ready = downCnt > 0;
-                // 下行池为 0：网页只显示这一句
-                string readyText = ready ? "连接成功" : "异常重新走流程";
+                int njDown = st.Pool.Count(p => p.Downlink);
+                int p65Down = st.Pool65010.Count(p => p.Downlink);
+                int downCnt = njDown + p65Down;
+                bool ready = downCnt > 0 || (st.GreenUin != null && st.GreenUin.Length > 0);
+                string readyText;
+                if (ready)
+                    readyText = "绿就绪 NJ=" + njDown + " 65010=" + p65Down
+                                + (st.GreenFrozen ? " (已冻结)" : "");
+                else if (st.GreenFrozen)
+                    readyText = "绿已冻结但池空，请点重置后再读取";
+                else if (st.Mode == WorkMode.Collect)
+                    readyText = "读取中…走一遍上号等下行（SOCKS 须经节点）";
+                else
+                    readyText = "尚未读到绿：点读取→上号→绿>0 再进大厅/修改";
                 return new AccountStatusDto
                 {
                     UserName = user,
                     Mode = st.Mode,
-                    PoolCount = downCnt > 0 ? downCnt : st.Pool.Count,
+                    PoolCount = downCnt,
                     PoolVersion = st.Version,
                     CollectCount = st.CollectCount,
                     ModifyCount = st.ModifyCount,
@@ -196,14 +217,24 @@ namespace Shuangji.Common
             }
         }
 
-        /// <summary>切换大厅/局内前检查是否已读到绿数据。</summary>
+        /// <summary>切换大厅/修改前检查是否已读到绿数据。</summary>
         public bool CanEnterMode(string user, WorkMode mode, out string reason)
         {
             reason = "";
             if (mode != WorkMode.Lobby && mode != WorkMode.Modify)
                 return true;
             if (GetDownlinkPoolCount(user) > 0) return true;
-            reason = "异常重新走流程";
+            var st = Get(user);
+            lock (st.Lock)
+            {
+                if (st.GreenUin != null && st.GreenUin.Length > 0) return true;
+                if (st.GreenFrozen)
+                {
+                    reason = "绿已冻结且池空，请先点重置再读取上号";
+                    return false;
+                }
+            }
+            reason = "尚未读到绿数据：请先点「读取」，用同一账号走 SOCKS 上号，等绿>0 再进大厅/修改";
             return false;
         }
 
@@ -456,17 +487,23 @@ namespace Shuangji.Common
 
         private static bool HasDownlinkGreen(AccountState st)
         {
-            lock (st.Lock) return st.Pool.Any(p => p.Downlink && p.Data != null && p.Data.Length > 0);
+            lock (st.Lock)
+            {
+                if (st.Pool.Any(p => p.Downlink && p.Data != null && p.Data.Length > 0)) return true;
+                if (st.Pool65010.Any(p => p.Downlink && p.Data != null && p.Data.Length > 0)) return true;
+                return st.GreenUin != null && st.GreenUin.Length > 0;
+            }
         }
 
-        /// <summary>读取模式：记录 65010 的 33 66/40 13 小包到专用池（供载荷替换，非整帧）。</summary>
+        /// <summary>读取模式：记录 65010 下行 33 66 小包到专用池（上号期未必带 40 13）。</summary>
         private int Collect65010(AccountState st, PacketJob job)
         {
             if (job.Port != 65010 || job.Data == null) return 0;
+            // 绿样本只收下发
+            if (!job.IsServerToClient) return 0;
             var data = job.Data;
-            if (data.Length < Frame65010HeaderLen + 2 || data.Length >= BoostMinLen) return 0;
+            if (data.Length < 8 || data.Length >= BoostMinLen) return 0;
             if (data[0] != 0x33 || data[1] != 0x66) return 0;
-            if (!Has4013Variant(data)) return 0;
             // 检测文件块不当绿样本
             if (Has4013DetectionFile(data)) return 0;
 
@@ -530,12 +567,16 @@ namespace Shuangji.Common
         {
             int added = 0;
             var data = job.Data;
-            if (data == null || !HasSig(data)) return 0;
+            if (data == null) return 0;
 
             // 只收下行（下发）= 绿色数据包来源
             if (!job.IsServerToClient) return 0;
 
-            bool nj = IsNjHost(job.Host);
+            bool nj = IsNjHost(job.Host) || job.Port == 10012 || job.Port == 10011 || job.Port == 10013;
+            // 非 NJ/关注端口且无特征：不收，避免把无关 HTTPS 塞进绿池
+            if (!nj && job.Port != 443 && job.Port != 80 && !HasSig(data)) return 0;
+            if (!HasSig(data) && !nj) return 0;
+
             int frameCap = nj ? 16384 : 8192;
 
             int limit = Math.Min(data.Length, 65536) - 10;
@@ -573,20 +614,31 @@ namespace Shuangji.Common
                     added++;
             }
 
-            // 无经典 00 01…01 00 09 时：靠 01 0A 00 23 仍入库（带前 3 字节校验）
+            // 无经典 00 01…01 00 09 时：靠 01 0A 00 23/09 仍入库
             if (added == 0 && nj)
             {
                 int t = IndexOfNjTag(data, 0x23);
                 if (t < 3) t = IndexOfNjTag(data, 0x09);
                 if (t >= 3)
                 {
-                    string info1Hex = HttpUtil.BytesToHex(new[] { data[t - 3], data[t - 2], data[t - 1] }, 3);
+                    string info1Hex = t >= 3
+                        ? HttpUtil.BytesToHex(new[] { data[t - 3], data[t - 2], data[t - 1] }, 3)
+                        : "000000";
                     string info2Hex = data[t + 3].ToString("X2");
                     string key = "D|NJ|TAG3|" + info1Hex + "|" + info2Hex + "|" + data.Length;
                     if (TryAddPoolFrame(st, job, data, frameCap, key, info1Hex, info2Hex,
                             HttpUtil.BytesToHex(data, Math.Min(48, data.Length))))
                         added++;
                 }
+            }
+
+            // 仍无命中：NJ/10012 下行大包兜底入库（否则绿一直为 0）
+            if (added == 0 && nj && data.Length >= 64 && data.Length < 65536)
+            {
+                string key = "D|NJ|RAW|" + data.Length + "|" + HttpUtil.BytesToHex(data, 32);
+                if (TryAddPoolFrame(st, job, data, frameCap, key, "", "",
+                        HttpUtil.BytesToHex(data, Math.Min(48, data.Length))))
+                    added++;
             }
 
             if (added > 0)

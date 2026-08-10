@@ -5,6 +5,9 @@ struct InjectHomeView: View {
     @State private var filter = ""
     @State private var busyID: String?
     @State private var banner: String?
+    @State private var alertTitle = ""
+    @State private var alertMsg = ""
+    @State private var showAlert = false
     @State private var scope = 0 // 0全部 1用户 2已注入
 
     var filtered: [AppEntry] {
@@ -102,6 +105,11 @@ struct InjectHomeView: View {
                 }
             }
             .onAppear { reload() }
+            .alert(alertTitle, isPresented: $showAlert) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(alertMsg)
+            }
         }
         .navigationViewStyle(.stack)
     }
@@ -121,13 +129,19 @@ struct InjectHomeView: View {
                 try BuiltinInjector.inject(into: app)
                 DispatchQueue.main.async {
                     busyID = nil
-                    banner = "完成"
+                    banner = "注入完成"
+                    alertTitle = "注入成功"
+                    alertMsg = "已写入 \(app.name)。\n请重新打开游戏，约 1～3 秒后若钩子生效会再弹「水溶C」提示窗。"
+                    showAlert = true
                     reload()
                 }
             } catch {
                 DispatchQueue.main.async {
                     busyID = nil
                     banner = error.localizedDescription
+                    alertTitle = "注入失败"
+                    alertMsg = error.localizedDescription
+                    showAlert = true
                 }
             }
         }
