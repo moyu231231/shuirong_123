@@ -315,7 +315,8 @@ static int try_candidate(const char *path, char *best, size_t bestn, size_t *bes
     int was_fat = 0;
     uint8_t *buf = load_thin_arm64(path, &n, &was_fat);
     if (!buf) return 0;
-    int ok = (!was_fat && !is_encrypted_slice(buf, n));
+    /* fat 已抽出 arm64 slice；只要 slice 未加密即可（insert_dylib 也能处理 fat） */
+    int ok = !is_encrypted_slice(buf, n);
     free(buf);
     if (!ok) return 0;
     struct stat st;
@@ -392,7 +393,30 @@ static int find_inject_target(const char *app, char *out, size_t outn) {
         return 0;
     }
 
-    /* 最后才碰主程序（很多有注入保护的游戏主程序会被秒杀） */
+    /* 第三轮：Frameworks 根目录裸 dylib（TrollFools 兼容） */
+    best_size = 0;
+    d = opendir(fwkroot);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            size_t nl = strlen(ent->d_name);
+            if (nl < 7 || strcmp(ent->d_name + nl - 6, ".dylib") != 0) continue;
+            if (is_blocked_framework(ent->d_name)) continue;
+            if (!strncmp(ent->d_name, "libswift", 8)) continue;
+            if (!strcmp(ent->d_name, "ApolloNetService.dylib")) continue;
+            if (!strcmp(ent->d_name, "ShuiyongMem.dylib")) continue;
+            char cand[1200];
+            snprintf(cand, sizeof(cand), "%s/%s", fwkroot, ent->d_name);
+            try_candidate(cand, best, sizeof(best), &best_size, 1);
+        }
+        closedir(d);
+    }
+    if (best[0]) {
+        snprintf(out, outn, "%s", best);
+        return 0;
+    }
+
+    /* 最后才碰主程序（加密主程序绝不能选） */
     char exe[256];
     if (plist_executable(app, exe, sizeof(exe)) == 0) {
         char cand[1200];
@@ -412,7 +436,7 @@ static void chown_installd(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject mkdir|cp|rm|chown33|deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chown33|enc|find|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
@@ -458,6 +482,36 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "chown33")) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }
         chown_installd(path);
+        return 0;
+    }
+    /* 0=未加密可注入 1=加密 2=无法解析 */
+    if (!strcmp(mode, "enc")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 2; }
+        size_t n = 0;
+        int was_fat = 0;
+        uint8_t *buf = load_thin_arm64(path, &n, &was_fat);
+        if (!buf) {
+            fprintf(stderr, "unreadable\n");
+            return 2;
+        }
+        int enc = is_encrypted_slice(buf, n);
+        free(buf);
+        if (enc) {
+            fprintf(stdout, "encrypted\n");
+            return 1;
+        }
+        fprintf(stdout, "ok%s\n", was_fat ? " fat" : "");
+        return 0;
+    }
+    /* 打印最佳未加密注入目标路径 */
+    if (!strcmp(mode, "find")) {
+        if (!app) { fprintf(stderr, "need --app\n"); return 1; }
+        char target[1200];
+        if (find_inject_target(app, target, sizeof(target)) != 0) {
+            fprintf(stderr, "no injectable mach-o\n");
+            return 1;
+        }
+        fprintf(stdout, "%s\n", target);
         return 0;
     }
 

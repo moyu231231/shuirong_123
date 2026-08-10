@@ -122,7 +122,11 @@ void sy_install_report_hooks(void) {
     if (once) return;
     once = 1;
 
-    /* 出站：抽空报告（举报 / 异常上报 GS+队列） */
+    /*
+     * 只瘫痪出站报告队列（get_report*）。
+     * 不补丁 rcv_anti / OnRecvData：入站收包被掐容易在局内秒闪。
+     * 检测下发仍由隧道/网关层清洗。
+     */
     static const char *ret0_syms[] = {
         "tss_get_report_data",
         "tss_get_report_data2",
@@ -132,9 +136,6 @@ void sy_install_report_hooks(void) {
         "TssSDKGetReportData2",
         "TssSDKGetReportData3",
         "TssSDKGetReportData4",
-        /* 入站检测载荷：直接吞掉，避免再进扫描队列 */
-        "tss_sdk_rcv_anti_data",
-        "TssSDKOnRecvData",
         NULL
     };
     for (int i = 0; ret0_syms[i]; i++) {
