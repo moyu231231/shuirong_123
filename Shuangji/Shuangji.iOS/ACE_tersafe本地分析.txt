@@ -81,15 +81,12 @@ __DATA.__bss   VA 0x2B8D90 size 0x11668  ← TDM 开关类全局量大概率在�
 ================================================================
 三、和我们现有代码的对照
 ================================================================
-现 sy_mempatch（已按延迟踢加固）：
-  ✓ DATA Tier2：BSS 0x2B8F58=0 / 0x2B8F59=1
-     COREREPORT @0x3F2AC 读这两字节；enabled==0 → return 0
-     （对标 ACE-ANTICHEAT g_tdm_report_enabled/checked，不改 COREREPORT TEXT）
-  ✓ GOT → 优先 tersafe 内 ret0 gadget，再系统库
-  ✓ OnRecv / rcv_anti_data / OnRecvSignature TEXT ret0
-  ✓ TssSDKGetReportData* 薄导出 TEXT ret0（挡游戏轮询→send_gs）
-  ✓ COREREPORT TEXT 仅作 DATA 失败时的 fallback
-  ✗ 没动 MRPCS 扫描线程 / bin_patch 扫描器本身
+现 sy_mempatch（稳态，已撤闪退路径）：
+  ✓ DATA Tier2：写前校验 COREREPORT 入口 4 指令；对上才写
+     BSS 0x2B8F58=0 / 0x2B8F59=1
+  ✓ GOT：仅 OnRecv / rcv_anti_data（int）
+  ✗ 已移除：GetReport TEXT、OnRecv TEXT、COREREPORT TEXT、GetReport GOT
+     （GetReport→NULL 易空指针闪退；TEXT 易被 bin_patch/自杀）
   ✗ 状态 VPN 不拦包；send_cs 仍靠云端 4013
 
 现网关 4013：

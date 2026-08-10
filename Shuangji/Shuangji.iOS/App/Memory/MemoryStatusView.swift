@@ -12,15 +12,13 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("内存补丁") {
-                    row("DATA门闩", "COREREPORT enabled=0/checked=1（防延迟踢）")
-                    row("GOT", "外层导入 → tersafe/系统 ret0")
-                    row("OnRecv", "检测下发入口 TEXT ret0")
-                    row("GetReport", "TssSDKGetReportData* 薄导出 ret0")
-                    row("不做", "匿名 RX / COREREPORT TEXT（门闩够用时）/ 总闸")
+                Section("内存补丁（稳态）") {
+                    row("DATA门闩", "版本校验后写 COREREPORT enabled/checked")
+                    row("GOT", "仅 OnRecv → ret0（不改 GetReport）")
+                    row("不做", "任何 TEXT / GetReport / 匿名 RX / 总闸")
                 }
                 Section("注意") {
-                    Text("延迟踢多半是上报积压后送出。门闩挡 COREREPORT；小火箭改修改模式仍要拦 send_cs/4013。")
+                    Text("已去掉会闪退的 TEXT。门闩+小火箭修改模式一起用。状态里 flag=1 才算门闩生效。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

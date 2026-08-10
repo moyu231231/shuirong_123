@@ -1,7 +1,7 @@
 import Foundation
 
-/// 默认 mempatch：DATA 门闩（COREREPORT）+ GOT + OnRecv/GetReport TEXT。
-/// 针对局内延迟踢；云端 4013 仍作 send_cs 兜底。不 dlopen。
+/// 默认 mempatch（稳态）：DATA 门闩 + OnRecv GOT。无任何 TEXT，避免闪退。
+/// 云端 4013 仍作 send_cs 兜底。不 dlopen。
 enum BuiltinInjector {
 
     /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名

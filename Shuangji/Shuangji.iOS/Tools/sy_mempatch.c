@@ -1,11 +1,10 @@
 ﻿/*
- * ACE mempatch (no dylib) — 针对「局内过一会踢」：
- *   0) DATA Tier2：COREREPORT 门闩 byte@0x2B8F58=0 / 0x2B8F59=1
- *      （对标 ACE-ANTICHEAT g_tdm_report_enabled / checked，不改 TEXT）
- *   A) GOT → tersafe/系统内现成 MOV X0,#0;RET（不造匿名 RX）
- *   B) TEXT ret0：OnRecv / rcv_anti_data / OnRecvSignature（挡检测下发）
- *   C) TEXT ret0：TssSDKGetReportData* 薄导出（挡游戏轮询夹带 send_gs）
- *   不做：COREREPORT TEXT、总闸、匿名页、全量 DATA 指针扫
+ * ACE mempatch (no dylib) — 稳态版（避免闪退）：
+ *   0) DATA Tier2：COREREPORT 门闩 0x2B8F58=0 / 0x2B8F59=1
+ *      写前校验 COREREPORT 入口机器码，版本不对则跳过（防写错 BSS）
+ *   A) GOT：仅 OnRecv / rcv_anti_data → ret0（int 返回，不会空指针解引用）
+ *   不做任何 TEXT 补丁：GetReport/COREREPORT/OnRecv TEXT 都曾导致闪退或自杀
+ *   不做：匿名 RX、总闸、全量 DATA 指针扫
  *
  *   sy_mempatch <pid>
  */
@@ -51,20 +50,6 @@ static kern_return_t tread(task_t task, raddr_t addr, void *buf, rsize_t sz) {
 static int twrite_raw(task_t task, raddr_t addr, const void *buf, rsize_t sz) {
     kern_return_t kr = vm_write(task, addr, (vm_offset_t)(uintptr_t)buf, (mach_msg_type_number_t)sz);
     return kr == KERN_SUCCESS ? 0 : -1;
-}
-
-static int twrite_code(task_t task, raddr_t addr, const void *buf, rsize_t sz) {
-    raddr_t page = addr & ~PAGE_MASK;
-    rsize_t span = ((addr - page) + sz + PAGE_MASK) & ~PAGE_MASK;
-    kern_return_t kr = vm_protect(task, page, span, FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS)
-        kr = vm_protect(task, page, span, FALSE,
-                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) return -1;
-    if (twrite_raw(task, addr, buf, sz) != 0) return -2;
-    vm_protect(task, page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    return 0;
 }
 
 typedef struct {
@@ -338,31 +323,6 @@ static raddr_t find_ret0_gadget(task_t task, remote_img_t *imgs, uint32_t nimg,
     return 0;
 }
 
-static int patch_ret0(task_t task, raddr_t addr) {
-    uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u };
-    return twrite_code(task, addr, code, sizeof(code));
-}
-
-static int looks_like_func_prologue(const uint32_t *w) {
-    if (w[0] == 0xD2800000u && w[1] == 0xD65F03C0u) return 2;
-    uint32_t op = w[0];
-    if (op == 0 || op == 0xFFFFFFFFu) return 0;
-    if ((op & 0xFFE00000u) == 0xD4200000u) return 0;
-    if ((op & 0xFFC00000u) == 0xA9000000u) return 1;
-    if ((op & 0xFFC00000u) == 0xA9800000u) return 1;
-    if ((op & 0xFFC003FFu) == 0xD10003FFu) return 1;
-    if (op == 0xD503237Fu) return 1;
-    if ((op & 0xFFE0FFE0u) == 0xAA0003E0u) return 1;
-    if ((op & 0xFF000000u) == 0xD1000000u) return 1;
-    if ((op & 0xFF000000u) == 0xF9000000u) return 1;
-    if ((op & 0x9F000000u) == 0x90000000u) return 1;
-    if ((op & 0x7E000000u) == 0x34000000u) return 1;
-    if ((op & 0xFC000000u) == 0x14000000u) return 1;
-    if ((op & 0xFC000000u) == 0x94000000u) return 1;
-    if ((op & 0xFF800000u) == 0xD2800000u) return 1;
-    return 0;
-}
-
 static raddr_t resolve_slide(task_t task, raddr_t tersafe, raddr_t anchor_sym) {
     raddr_t slide = 0;
     image_slide(task, tersafe, &slide);
@@ -377,11 +337,33 @@ static raddr_t resolve_slide(task_t task, raddr_t tersafe, raddr_t anchor_sym) {
     return slide;
 }
 
+/* 本地 v7.7.49.57576 COREREPORT 入口前 4 条指令（写 BSS 前必须对上） */
+static int corereport_version_ok(task_t task, raddr_t slide) {
+    static const uint32_t expect[4] = {
+        0xA9BC5FF8u, 0xA90157F6u, 0xA9024FF4u, 0xA9037BFDu
+    };
+    uint32_t w[4] = {0};
+    raddr_t addr = slide + RVA_COREREPORT;
+    if (tread(task, addr, w, sizeof(w)) != KERN_SUCCESS) {
+        fprintf(stdout, "flag skip: cannot read COREREPORT @ 0x%llx\n",
+                (unsigned long long)addr);
+        return 0;
+    }
+    if (memcmp(w, expect, sizeof(expect)) != 0) {
+        fprintf(stdout, "flag skip: COREREPORT mismatch @ 0x%llx  %08x %08x %08x %08x\n",
+                (unsigned long long)addr, w[0], w[1], w[2], w[3]);
+        return 0;
+    }
+    return 1;
+}
+
 /*
  * Tier2 DATA：enabled=0 + checked=1
  * COREREPORT 见 0x3F2AC..0x3F2C0：checked 置位且 enabled==0 → 直接 return 0
  */
 static int patch_tdm_flags(task_t task, raddr_t slide) {
+    if (!corereport_version_ok(task, slide)) return 0;
+
     raddr_t en = slide + RVA_TDM_ENABLED;
     raddr_t ck = slide + RVA_TDM_CHECKED;
     uint8_t cur[2] = {0xFF, 0xFF};
@@ -403,49 +385,6 @@ static int patch_tdm_flags(task_t task, raddr_t slide) {
             (unsigned long long)en, (unsigned long long)ck,
             cur[0], cur[1], verify[0], verify[1]);
     return (verify[0] == 0x00 && verify[1] == 0x01) ? 1 : 0;
-}
-
-static int patch_syms_ret0(task_t task, raddr_t tersafe, const char **names, const char *tag) {
-    int ok = 0;
-    for (int i = 0; names[i]; i++) {
-        raddr_t a = remote_sym(task, tersafe, names[i]);
-        if (!a) {
-            fprintf(stdout, "%s miss %s\n", tag, names[i]);
-            continue;
-        }
-        uint32_t w[2] = {0, 0};
-        if (tread(task, a, w, sizeof(w)) != KERN_SUCCESS) continue;
-        int kind = looks_like_func_prologue(w);
-        if (kind == 0) {
-            fprintf(stdout, "%s skip %s bad prologue %08x %08x\n",
-                    tag, names[i], w[0], w[1]);
-            continue;
-        }
-        if (kind == 2 || patch_ret0(task, a) == 0) {
-            ok++;
-            fprintf(stdout, "%s ok %s @ 0x%llx\n", tag, names[i], (unsigned long long)a);
-        } else {
-            fprintf(stdout, "%s fail %s @ 0x%llx\n", tag, names[i], (unsigned long long)a);
-        }
-    }
-    return ok;
-}
-
-/* 仅当 DATA 门闩失败时，才退回 COREREPORT TEXT */
-static int patch_corereport_text_fallback(task_t task, raddr_t slide) {
-    raddr_t addr = slide + RVA_COREREPORT;
-    uint32_t w[2] = {0, 0};
-    if (tread(task, addr, w, sizeof(w)) != KERN_SUCCESS) return 0;
-    int kind = looks_like_func_prologue(w);
-    if (kind == 0) {
-        fprintf(stdout, "leaf skip COREREPORT prologue=%08x %08x\n", w[0], w[1]);
-        return 0;
-    }
-    if (kind == 2 || patch_ret0(task, addr) == 0) {
-        fprintf(stdout, "leaf ok COREREPORT @ 0x%llx (fallback)\n", (unsigned long long)addr);
-        return 1;
-    }
-    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -504,35 +443,32 @@ int main(int argc, char **argv) {
         return 4;
     }
 
-    static const char *syms[] = {
-        "tss_get_report_data", "tss_get_report_data2",
-        "tss_get_report_data3", "tss_get_report_data4",
-        "TssSDKGetReportData", "TssSDKGetReportData2",
-        "TssSDKGetReportData3", "TssSDKGetReportData4",
-        "TssSDKOnRecvData", "TssSDKOnRecvSignature",
-        "tss_sdk_rcv_anti_data",
-        NULL
-    };
-
-    raddr_t addrs[24];
-    int naddr = 0;
-    raddr_t anchor = 0;
-    memset(addrs, 0, sizeof(addrs));
-    for (int i = 0; syms[i] && naddr < 24; i++) {
-        raddr_t a = remote_sym(task, tersafe, syms[i]);
-        if (!a) {
-            fprintf(stdout, "miss %s\n", syms[i]);
-            continue;
-        }
-        fprintf(stdout, "sym %s @ 0x%llx\n", syms[i], (unsigned long long)a);
-        if (!strcmp(syms[i], "tss_get_report_data")) anchor = a;
-        addrs[naddr++] = a;
-    }
-    if (naddr == 0) {
+    /* 仅用于算 slide；GOT 不改 GetReport（ret0→NULL 易空指针闪退） */
+    raddr_t anchor = remote_sym(task, tersafe, "tss_get_report_data");
+    if (!anchor) anchor = remote_sym(task, tersafe, "TssSDKGetReportData");
+    if (!anchor) {
         write_status("FAIL no_syms");
         free(imgs);
         mach_port_deallocate(mach_task_self(), task);
         return 5;
+    }
+    fprintf(stdout, "sym anchor @ 0x%llx\n", (unsigned long long)anchor);
+
+    /* GOT 只挡检测下发（返回 int） */
+    static const char *got_syms[] = {
+        "TssSDKOnRecvData", "tss_sdk_rcv_anti_data", NULL
+    };
+    raddr_t addrs[8];
+    int naddr = 0;
+    memset(addrs, 0, sizeof(addrs));
+    for (int i = 0; got_syms[i] && naddr < 8; i++) {
+        raddr_t a = remote_sym(task, tersafe, got_syms[i]);
+        if (!a) {
+            fprintf(stdout, "miss %s\n", got_syms[i]);
+            continue;
+        }
+        fprintf(stdout, "sym %s @ 0x%llx\n", got_syms[i], (unsigned long long)a);
+        addrs[naddr++] = a;
     }
 
     raddr_t slide = resolve_slide(task, tersafe, anchor);
@@ -542,64 +478,32 @@ int main(int argc, char **argv) {
     fprintf(stdout, "stub @ 0x%llx\n", (unsigned long long)stub);
 
     int got_hits = 0;
-    if (stub) {
+    if (stub && naddr > 0) {
         got_hits = rewrite_gots(task, imgs, nimg, tersafe, addrs, naddr, stub);
     } else {
-        fprintf(stdout, "got skipped (no gadget)\n");
+        fprintf(stdout, "got skipped\n");
     }
     fprintf(stdout, "got_rewrites=%d\n", got_hits);
 
-    task_suspend(task);
-
-    /* 0) DATA 门闩先打：上报汇聚直接空返回（延迟踢主因） */
+    /* 不 suspend：减少卡死/异常；只写 DATA 门闩，零 TEXT */
     int flag_ok = patch_tdm_flags(task, slide);
-
-    /* B) 检测下发 */
-    static const char *recv_syms[] = {
-        "TssSDKOnRecvData", "tss_sdk_rcv_anti_data", "TssSDKOnRecvSignature",
-        NULL
-    };
-    int recv_ok = patch_syms_ret0(task, tersafe, recv_syms, "recv");
-
-    /* C) 取报告薄导出：游戏轮询后 send_gs 夹带 */
-    static const char *report_syms[] = {
-        "TssSDKGetReportData", "TssSDKGetReportData2",
-        "TssSDKGetReportData3", "TssSDKGetReportData4",
-        NULL
-    };
-    int report_ok = patch_syms_ret0(task, tersafe, report_syms, "report");
-
-    /* DATA 失败才 TEXT COREREPORT（增加 bin_patch 暴露） */
-    int leaf_ok = 0;
-    if (!flag_ok) {
-        leaf_ok = patch_corereport_text_fallback(task, slide);
-    }
-
-    /* 再写一次门闩，防中间路径回写 */
-    if (flag_ok) {
-        flag_ok = patch_tdm_flags(task, slide);
-    }
-
-    fprintf(stdout, "flag=%d recv=%d report=%d leaf=%d got=%d\n",
-            flag_ok, recv_ok, report_ok, leaf_ok, got_hits);
-
-    task_resume(task);
+    fprintf(stdout, "flag=%d got=%d\n", flag_ok, got_hits);
 
     free(imgs);
     mach_port_deallocate(mach_task_self(), task);
 
-    char buf[280];
-    if (flag_ok > 0 || got_hits > 0 || recv_ok > 0 || report_ok > 0 || leaf_ok > 0) {
+    char buf[240];
+    if (flag_ok > 0 || got_hits > 0) {
         snprintf(buf, sizeof(buf),
-                 "OK mempatch flag=%d got=%d recv=%d report=%d leaf=%d syms=%d pid=%d time=%ld",
-                 flag_ok, got_hits, recv_ok, report_ok, leaf_ok, naddr, (int)pid, (long)time(NULL));
+                 "OK mempatch flag=%d got=%d recv=0 report=0 leaf=0 syms=%d pid=%d time=%ld",
+                 flag_ok, got_hits, naddr, (int)pid, (long)time(NULL));
         write_status(buf);
         fprintf(stdout, "%s\n", buf);
         return 0;
     }
 
     snprintf(buf, sizeof(buf),
-             "FAIL mempatch flag=0 got=0 recv=0 report=0 leaf=0 syms=%d",
+             "FAIL mempatch flag=0 got=0 syms=%d",
              naddr);
     write_status(buf);
     fprintf(stdout, "%s\n", buf);
