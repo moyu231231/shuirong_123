@@ -495,6 +495,18 @@ int main(int argc, char **argv) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }
         return access(path, F_OK) == 0 ? 0 : 1;
     }
+    /* 打印文件内容到 stdout（给 App 查补丁状态用） */
+    if (!strcmp(mode, "cat")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 1; }
+        FILE *f = fopen(path, "rb");
+        if (!f) { perror(path); return 2; }
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+            fwrite(buf, 1, n, stdout);
+        fclose(f);
+        return 0;
+    }
     /* 0=未加密可注入 1=加密 2=无法解析 */
     if (!strcmp(mode, "enc")) {
         if (!path) { fprintf(stderr, "need --path\n"); return 2; }

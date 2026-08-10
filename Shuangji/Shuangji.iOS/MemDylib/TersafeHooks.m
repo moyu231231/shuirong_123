@@ -1,19 +1,41 @@
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach-o/dyld.h>
 #import <sys/mman.h>
+#import <sys/stat.h>
 #import <unistd.h>
 #import <string.h>
+#import <stdio.h>
+#import <time.h>
+#import <dispatch/dispatch.h>
 #import "TersafeThreadChaos.h"
 
+/* 水溶C App 用 root 读此文件，代替游戏内弹窗 */
+#define SY_STATUS_PATH "/var/mobile/Library/Caches/sy_ports_status.txt"
+
+static void sy_write_status(const char *line) {
+    mkdir("/var/mobile/Library/Caches", 0755);
+    const char *paths[] = {
+        SY_STATUS_PATH,
+        "/tmp/sy_ports_status.txt",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "w");
+        if (!f) continue;
+        fprintf(f, "%s\n", line);
+        fclose(f);
+        chmod(paths[i], 0644);
+        fprintf(stderr, "[水溶C] %s -> %s\n", line, paths[i]);
+        return;
+    }
+    fprintf(stderr, "[水溶C] status write fail: %s\n", line);
+}
+
 /*
- * 闪退对策：
- *  - 不用 fishhook
- *  - 不打 enable / 内部 RVA
- *  - tersafe 出现后再等 20 秒，只改 get_report* 导出
- *  - 成功后再出浮条
+ * 弹窗/UIWindow 一出就闪 → 游戏内禁止任何 UI。
+ * 只做：延迟后补丁 get_report* 导出；成功打日志。
+ * 不用 fishhook / 内部 RVA / enable / UIKit。
  */
 
 static const struct mach_header_64 *sy_hdr;
@@ -102,70 +124,13 @@ static void *sy_dlsym_tersafe(const char *name) {
     return NULL;
 }
 
-static UIWindow *sy_toast_window;
-
-static void sy_show_toast(NSString *msg) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (sy_toast_window) {
-                sy_toast_window.hidden = YES;
-                sy_toast_window = nil;
-            }
-            CGRect bounds = UIScreen.mainScreen.bounds;
-            UIWindow *w = [[UIWindow alloc] initWithFrame:bounds];
-            w.windowLevel = UIWindowLevelStatusBar + 100;
-            w.backgroundColor = UIColor.clearColor;
-            w.userInteractionEnabled = NO;
-            if (@available(iOS 13.0, *)) {
-                for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-                    if ([scene isKindOfClass:[UIWindowScene class]] &&
-                        scene.activationState == UISceneActivationStateForegroundActive) {
-                        w.windowScene = (UIWindowScene *)scene;
-                        break;
-                    }
-                }
-            }
-            UIViewController *vc = [UIViewController new];
-            vc.view.backgroundColor = UIColor.clearColor;
-            w.rootViewController = vc;
-
-            UILabel *lab = [[UILabel alloc] init];
-            lab.text = msg;
-            lab.numberOfLines = 0;
-            lab.textAlignment = NSTextAlignmentCenter;
-            lab.font = [UIFont boldSystemFontOfSize:15];
-            lab.textColor = UIColor.whiteColor;
-            lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
-            lab.layer.cornerRadius = 12;
-            lab.clipsToBounds = YES;
-            CGFloat pad = 16;
-            CGFloat maxW = MIN(bounds.size.width, bounds.size.height) - 48;
-            CGSize sz = [lab sizeThatFits:CGSizeMake(maxW, 400)];
-            lab.frame = CGRectMake((bounds.size.width - sz.width - pad * 2) / 2,
-                                   bounds.size.height * 0.18,
-                                   sz.width + pad * 2, sz.height + pad);
-            [vc.view addSubview:lab];
-            w.hidden = NO;
-            sy_toast_window = w;
-            NSLog(@"[水溶C] %@", msg);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (sy_toast_window == w) {
-                    w.hidden = YES;
-                    sy_toast_window = nil;
-                }
-            });
-        } @catch (__unused NSException *ex) {}
-    });
-}
-
 void sy_install_report_hooks(void) {
     static int once = 0;
     if (once) return;
     once = 1;
 
     if (sy_find_tersafe() != 0) {
-        sy_show_toast(@"水溶C：未找到 tersafe");
+        sy_write_status("FAIL no_tersafe");
         return;
     }
 
@@ -181,8 +146,12 @@ void sy_install_report_hooks(void) {
         void *fn = sy_dlsym_tersafe(exports[i]);
         if (fn && sy_patch_ret0(fn) == 0) exp++;
     }
-
-    sy_show_toast([NSString stringWithFormat:@"水溶C：报告钩子已生效\n导出补丁 %d", exp]);
+    char buf[160];
+    if (exp > 0)
+        snprintf(buf, sizeof(buf), "OK patched=%d time=%ld", exp, (long)time(NULL));
+    else
+        snprintf(buf, sizeof(buf), "FAIL patched=0 time=%ld", (long)time(NULL));
+    sy_write_status(buf);
 }
 
 void sy_thread_chaos_start(void) {}
@@ -190,17 +159,16 @@ void sy_thread_chaos_start(void) {}
 __attribute__((constructor))
 static void sy_entry(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        int found = 0;
+        sy_write_status("WAIT loaded waiting_tersafe");
         for (int i = 0; i < 60; i++) {
             sleep(1);
-            if (sy_find_tersafe() == 0) { found = 1; break; }
+            if (sy_find_tersafe() == 0) break;
         }
-        if (!found) {
-            sleep(2);
-            sy_show_toast(@"水溶C：未找到 tersafe");
+        if (sy_find_tersafe() != 0) {
+            sy_write_status("FAIL tersafe_not_found");
             return;
         }
-        /* 等 ACE/游戏初始化过完再改码 */
+        sy_write_status("WAIT tersafe_found delay_20s");
         sleep(20);
         sy_install_report_hooks();
     });
