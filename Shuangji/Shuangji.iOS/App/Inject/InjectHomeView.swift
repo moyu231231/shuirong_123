@@ -134,7 +134,7 @@ struct InjectHomeView: View {
     }
 
     private func launch(_ bundleID: String) {
-        let ok = LSApplicationWorkspace.default().openApplication(withBundleID: bundleID)
+        let ok = LSApplicationWorkspace.defaultWorkspace().openApplication(withBundleID: bundleID)
         banner = ok ? "正在打开…" : "打开失败，请手动点图标"
     }
 

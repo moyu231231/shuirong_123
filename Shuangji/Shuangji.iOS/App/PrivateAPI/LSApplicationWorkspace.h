@@ -6,7 +6,7 @@
 @class LSApplicationProxy;
 
 @interface LSApplicationWorkspace : NSObject
-+ (LSApplicationWorkspace *)defaultWorkspace;
++ (LSApplicationWorkspace *)defaultWorkspace NS_SWIFT_NAME(defaultWorkspace());
 - (NSArray *)allApplications;
 - (NSArray *)allInstalledApplications;
 - (void)enumerateApplicationsOfType:(NSInteger)type block:(void (^)(id))block;
