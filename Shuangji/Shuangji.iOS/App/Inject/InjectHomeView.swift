@@ -26,7 +26,7 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Text("推荐：无 dylib 内存补丁（task_for_pid 改 GOT/入口，不 dlopen、不落库）")
+                Text("推荐：纯本地三层（GOT + tersafe DATA + 叶子上报）— 不依赖网络、不 dlopen")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -148,15 +148,15 @@ struct InjectHomeView: View {
 
     private func memPatch(_ app: AppEntry) {
         busyID = app.bundleID
-        banner = "内存补丁中：启动 → 等 tersafe → 远程改 GOT/入口…"
+        banner = "纯本地补丁：启动 → 等 tersafe → GOT/DATA/叶子上报…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try BuiltinInjector.memPatch(into: app, settleSeconds: 40)
+                try BuiltinInjector.memPatch(into: app, settleSeconds: 45)
                 DispatchQueue.main.async {
                     busyID = nil
                     banner = "内存补丁完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "内存补丁成功"
-                    alertMsg = "无 dylib 远程补丁完成\n\(BuiltinInjector.lastTargetPath)\n\n只改 GOT，不改 tersafe 代码段（避免闪退）。\n退游戏需重做。\n4013 仍靠网络层。"
+                    alertMsg = "纯本地三层完成\n\(BuiltinInjector.lastTargetPath)\n\nA=GOT  B=tersafe DATA  C=叶子上报(COREREPORT等)\n不碰总闸/扫描器，不依赖网络。\n退游戏需重做。到「内存」页看 data/leaf 计数。"
                     showAlert = true
                     reload()
                 }
@@ -182,7 +182,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "动态注入完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "动态注入成功"
-                    alertMsg = "隐蔽动态注入完成\n\(BuiltinInjector.lastTargetPath)\n\n已伪装路径+注入后删文件，无 LC。\n退游戏需重注。\n上报请开链路 4013。"
+                    alertMsg = "隐蔽动态注入完成\n\(BuiltinInjector.lastTargetPath)\n\n备选方案（易被扫镜像）。\n推荐改用「内存补丁」。\n退游戏需重注。"
                     showAlert = true
                     reload()
                 }

@@ -2,9 +2,20 @@ import SwiftUI
 
 @main
 struct ShuiyongApp: App {
+    @State private var loggedIn = AuthSession.isLoggedIn
+
     var body: some Scene {
         WindowGroup {
-            RootTabView()
+            if loggedIn {
+                RootTabView(onLogout: {
+                    AuthSession.logout()
+                    loggedIn = false
+                })
+            } else {
+                LoginView {
+                    loggedIn = true
+                }
+            }
         }
     }
 }

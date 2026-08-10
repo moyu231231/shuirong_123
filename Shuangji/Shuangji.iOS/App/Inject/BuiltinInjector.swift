@@ -1,7 +1,7 @@
 import Foundation
 
-/// 默认：无 dylib 远程内存补丁（task_for_pid 改 GOT/导出，不 dlopen）。
-/// opainject/磁盘注入会新增镜像或改 LC，易被扫。
+/// 默认：纯本地三层 mempatch（GOT + tersafe DATA + 叶子上报 RVA）。
+/// 不依赖网络 4013；不 dlopen，避免新镜像被扫。
 enum BuiltinInjector {
 
     /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名
@@ -72,8 +72,8 @@ enum BuiltinInjector {
         "libquic_migration.dylib"
     ]
 
-    /// 推荐：无 dylib 内存补丁——干净启动 → 等 tersafe → sy_mempatch
-    static func memPatch(into app: AppEntry, settleSeconds: Int = 40) throws {
+    /// 推荐：纯本地 A+B+C——干净启动 → 等 tersafe → sy_mempatch
+    static func memPatch(into app: AppEntry, settleSeconds: Int = 45) throws {
         guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
         guard let mp = toolURL("sy_mempatch") else {
             throw InjectError.noTool("sy_mempatch（请重装新 tipa）")

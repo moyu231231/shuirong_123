@@ -12,14 +12,16 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("推荐：无 dylib 内存补丁") {
+                Section("推荐：纯本地三层") {
                     row("引擎", "sy_mempatch / task_for_pid")
-                    row("步骤", "只改 GOT（默认不改 TEXT）")
-                    row("特点", "不 dlopen、不落库、避免闪退")
-                    row("延时", "40s+随机抖动")
+                    row("A", "外层 GOT → ret0")
+                    row("B", "tersafe DATA 回调切断")
+                    row("C", "叶子上报 RVA（COREREPORT 等）")
+                    row("不做", "总闸 10E36C / 扫描器 / 网络 4013")
+                    row("延时", "45s+随机抖动")
                 }
                 Section("备选") {
-                    row("动态注入", "opainject + Frameworks 伪装")
+                    row("动态注入", "opainject（易被扫镜像）")
                 }
                 Section("检查") {
                     Text(statusText)
@@ -61,6 +63,7 @@ struct MemoryStatusView: View {
                 if body.isEmpty {
                     statusText = "无状态\n请内存补丁后再查"
                 } else if body.hasPrefix("OK") {
+                    // Highlight data/leaf for pure-local success criteria
                     statusText = "✅ \(body)"
                 } else if body.hasPrefix("WAIT") {
                     statusText = "⏳ \(body)"

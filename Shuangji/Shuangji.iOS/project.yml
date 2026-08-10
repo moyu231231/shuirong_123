@@ -49,6 +49,14 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
+    info:
+      path: App/Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        CFBundleDisplayName: 水溶C
+        UILaunchScreen: {}
+        UIRequiresFullScreen: false
     # 注意：ShuiyongMem 绝不能 link/embed 进主 App（constructor 会钩 dyld，主程序秒闪）
     dependencies:
       - target: ShuiyongTunnel
@@ -65,10 +73,19 @@ targets:
         PRODUCT_NAME: ShuiyongTunnel
         PRODUCT_BUNDLE_IDENTIFIER: com.shuiyong.ports.tunnel
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: 链路
+        INFOPLIST_KEY_CFBundleDisplayName: 本机拦截
         INFOPLIST_KEY_NSExtension_NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
         INFOPLIST_KEY_NSExtension_NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
         CODE_SIGN_ENTITLEMENTS: entitlements/Tunnel.entitlements
+    info:
+      path: Tunnel/Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+
 
   ShuiyongMem:
     type: library.dynamic
