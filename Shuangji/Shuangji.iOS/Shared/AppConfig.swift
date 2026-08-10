@@ -44,7 +44,7 @@ public struct AppConfig: Codable, Equatable {
     }
 
     public func save() {
-        guard let defaults = UserDefaults(suiteName: appGroupId),
+        guard let defaults = UserDefaults(suiteName: Self.appGroupId),
               let data = try? JSONEncoder().encode(self)
         else { return }
         defaults.set(data, forKey: Self.configKey)

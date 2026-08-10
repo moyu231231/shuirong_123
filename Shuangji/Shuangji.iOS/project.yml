@@ -2,7 +2,7 @@ name: Shuiyong
 options:
   bundleIdPrefix: com.shuiyong
   deploymentTarget:
-    iOS: "14.0"
+    iOS: "15.0"
   # 与 GitHub macos-14 / Xcode 15.4 对齐，避免 objectVersion 77
   xcodeVersion: "15.0"
   objectVersion: 56
@@ -16,7 +16,7 @@ settings:
     CODE_SIGN_IDENTITY: ""
     TARGETED_DEVICE_FAMILY: "1,2"
     SWIFT_VERSION: "5.0"
-    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
     ENABLE_BITCODE: NO
 
 targets:

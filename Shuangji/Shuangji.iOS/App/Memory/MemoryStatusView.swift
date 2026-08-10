@@ -4,14 +4,34 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                LabeledContent("库", value: BuiltinInjector.dylibFileName)
-                LabeledContent("线程", value: "脉冲挂起")
-                LabeledContent("取数", value: "清空")
-                LabeledContent("发送", value: "特征过滤")
-                LabeledContent("加密", value: "输出置零")
+                HStack {
+                    Text("库")
+                    Spacer()
+                    Text(BuiltinInjector.dylibFileName).foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("线程")
+                    Spacer()
+                    Text("脉冲挂起").foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("取数")
+                    Spacer()
+                    Text("清空").foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("发送")
+                    Spacer()
+                    Text("特征过滤").foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("加密")
+                    Spacer()
+                    Text("输出置零").foregroundColor(.secondary)
+                }
             }
             .navigationTitle("内存")
         }
-        .navigationViewStyle(.stack)
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }
