@@ -4,20 +4,21 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("当前策略（防闪退）") {
-                    row("导出", "get_report* / enable → 空")
-                    row("导入表", "fishhook 仅报告符号")
-                    row("内部 RVA", "暂不打（曾致闪退）")
-                }
-                Section("成功标志") {
-                    Text("进游戏数秒后屏幕上方出现黑色浮条：「报告钩子已生效」。不是系统弹窗。")
+                Section("当前：安全空载") {
+                    Text("dylib 只加载、不打补丁、不挂 fishhook、不弹窗。用来确认注入本身会不会闪退。")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
-                Section("用法") {
-                    row("注入", "成功后自动打开游戏")
-                    row("iPad", "可与游戏分屏")
-                    row("网络", "4013 走链路，不钩 send")
+                Section("已关掉（曾致闪）") {
+                    row("TEXT补丁", "get_report / RVA")
+                    row("fishhook", "全进程重绑")
+                    row("UI", "游戏内浮窗/弹窗")
+                    row("网络钩", "send/write")
+                }
+                Section("上报怎么办") {
+                    Text("先用链路/网关拦 4013。进游戏不闪后再逐步加软钩子。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
                 }
             }
             .navigationTitle("内存")
@@ -29,7 +30,7 @@ struct MemoryStatusView: View {
         HStack {
             Text(k)
             Spacer()
-            Text(v).font(.caption).foregroundColor(.secondary).multilineTextAlignment(.trailing)
+            Text(v).font(.caption).foregroundColor(.secondary)
         }
     }
 }

@@ -151,7 +151,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "注入完成，即将打开游戏"
                     alertTitle = "注入成功"
-                    alertMsg = "已写入 \(app.name)。\n点「好」后自动打开游戏。\n进游戏数秒后顶部应出现「报告钩子已生效」浮条（非弹窗）。\niPad 可把本 App 与游戏分屏对照。"
+                    alertMsg = "已写入 \(app.name)。\n点「好」后自动打开游戏。\n当前 dylib 是「空载」：不打补丁、不钩网络。\n若仍闪退=注入/重签问题；能进游戏再开钩子。"
                     pendingLaunchID = app.bundleID
                     showAlert = true
                     reload()

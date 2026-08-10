@@ -90,8 +90,6 @@ targets:
         OTHER_LDFLAGS:
           - "-framework"
           - Foundation
-          - "-framework"
-          - UIKit
           - "-lobjc"
           - "-lpthread"
 
