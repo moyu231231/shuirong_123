@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct InjectHomeView: View {
     @State private var apps: [AppEntry] = []
@@ -9,6 +10,7 @@ struct InjectHomeView: View {
     @State private var alertMsg = ""
     @State private var showAlert = false
     @State private var scope = 0 // 0全部 1用户 2已注入
+    @State private var pendingLaunchID: String?
 
     var filtered: [AppEntry] {
         apps.filter { app in
@@ -77,6 +79,8 @@ struct InjectHomeView: View {
                                 } else if app.isInjected {
                                     Button("移除") { eject(app) }
                                         .buttonStyle(.bordered)
+                                    Button("打开") { launch(app.bundleID) }
+                                        .buttonStyle(.borderedProminent)
                                 } else {
                                     Button("注入") { inject(app) }
                                         .buttonStyle(.borderedProminent)
@@ -106,12 +110,20 @@ struct InjectHomeView: View {
             }
             .onAppear { reload() }
             .alert(alertTitle, isPresented: $showAlert) {
-                Button("好", role: .cancel) {}
+                Button("好", role: .cancel) {
+                    if let id = pendingLaunchID {
+                        pendingLaunchID = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            launch(id)
+                        }
+                    }
+                }
             } message: {
                 Text(alertMsg)
             }
         }
-        .navigationViewStyle(.stack)
+        // 分屏靠 Info.plist UIRequiresFullScreen=NO；导航用栈式避免宽屏空白
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     private func reload() {
@@ -121,19 +133,36 @@ struct InjectHomeView: View {
         }
     }
 
+    private func launch(_ bundleID: String) {
+        let ok = LSApplicationWorkspace.default().openApplication(withBundleID: bundleID)
+        banner = ok ? "正在打开…" : "打开失败，请手动点图标"
+    }
+
     private func inject(_ app: AppEntry) {
         busyID = app.bundleID
         banner = nil
+        pendingLaunchID = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try BuiltinInjector.inject(into: app)
+                // 注入前 kill 过，稍等系统释放再拉起
+                Thread.sleep(forTimeInterval: 0.8)
                 DispatchQueue.main.async {
                     busyID = nil
-                    banner = "注入完成"
+                    banner = "注入完成，即将打开游戏"
                     alertTitle = "注入成功"
-                    alertMsg = "已写入 \(app.name)。\n请先完全退出游戏再打开（运行中注入无效）。\n进游戏数秒后应弹出「报告钩子已生效」。"
+                    alertMsg = "已写入 \(app.name)。\n点「好」后自动打开游戏。\n进游戏数秒后顶部应出现「报告钩子已生效」浮条（非弹窗）。\niPad 可把本 App 与游戏分屏对照。"
+                    pendingLaunchID = app.bundleID
                     showAlert = true
                     reload()
+                    // 若用户不点弹窗，仍自动打开
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        if pendingLaunchID == app.bundleID {
+                            pendingLaunchID = nil
+                            showAlert = false
+                            launch(app.bundleID)
+                        }
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {

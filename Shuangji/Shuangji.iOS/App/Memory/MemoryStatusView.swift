@@ -4,21 +4,20 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("IDA 定点（tersafe 7.7.49）") {
+                Section("当前策略（防闪退）") {
                     row("导出", "get_report* / enable → 空")
-                    row("上报", "COREREPORT / TDM / shell")
-                    row("总闸", "0x10E36C ms 控制块 RET0")
-                    row("隐藏", "vm扫描 / shadowed / bin_patch / md5")
-                }
-                Section("明确不做") {
-                    row("线程", "不挂起、不扫线程名")
-                    row("网络", "不钩 send/write")
-                    row("用法", "退游戏→注入→再开")
+                    row("导入表", "fishhook 仅报告符号")
+                    row("内部 RVA", "暂不打（曾致闪退）")
                 }
                 Section("成功标志") {
-                    Text("进游戏数秒后弹窗：报告/检测补丁已生效（含各项计数）")
+                    Text("进游戏数秒后屏幕上方出现黑色浮条：「报告钩子已生效」。不是系统弹窗。")
                         .font(.footnote)
                         .foregroundColor(.secondary)
+                }
+                Section("用法") {
+                    row("注入", "成功后自动打开游戏")
+                    row("iPad", "可与游戏分屏")
+                    row("网络", "4013 走链路，不钩 send")
                 }
             }
             .navigationTitle("内存")
