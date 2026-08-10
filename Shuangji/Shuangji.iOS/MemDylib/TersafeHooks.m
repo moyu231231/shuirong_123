@@ -1,6 +1,5 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach-o/dyld.h>
@@ -8,18 +7,16 @@
 #import <unistd.h>
 #import <string.h>
 #import "TersafeThreadChaos.h"
-#import "fishhook.h"
 
 /*
- * 稳定版（注入名 sy_ports.dylib，勿再用 ApolloNetService）：
- *   ✓ 补丁 get_report* / TssSDKGetReportData* / enable → 空
- *   ✓ fishhook 仅报告导入表
- *   ✓ 顶部浮条提示
- *   ✗ 不打内部 RVA（曾闪）
- *   ✗ 不钩 send/write、不挂起线程
+ * 闪退对策：
+ *  - 不用 fishhook
+ *  - 不打 enable / 内部 RVA
+ *  - tersafe 出现后再等 20 秒，只改 get_report* 导出
+ *  - 成功后再出浮条
  */
 
-#pragma mark - patch
+static const struct mach_header_64 *sy_hdr;
 
 static size_t sy_page_size(void) { return (size_t)getpagesize(); }
 
@@ -43,7 +40,6 @@ static void sy_make_rx(void *addr, size_t len) {
     vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
-/* 不用 ___clear_cache；ARM64 手刷 icache */
 static void sy_flush_icache(void *addr, size_t len) {
 #if defined(__aarch64__)
     __asm__ __volatile__("dsb ish" ::: "memory");
@@ -61,9 +57,16 @@ static void sy_flush_icache(void *addr, size_t len) {
 #endif
 }
 
+static int sy_in_tersafe(void *fn) {
+    if (!fn || !sy_hdr) return 0;
+    uintptr_t a = (uintptr_t)fn;
+    uintptr_t base = (uintptr_t)sy_hdr;
+    return a >= base && a < base + 0x2000000;
+}
+
 static int sy_patch_ret0(void *fn) {
-    if (!fn) return -1;
-    uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u }; /* MOV X0,#0 ; RET */
+    if (!fn || !sy_in_tersafe(fn)) return -1;
+    uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u };
     if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
     memcpy(fn, code, sizeof(code));
     sy_flush_icache(fn, sizeof(code));
@@ -71,63 +74,33 @@ static int sy_patch_ret0(void *fn) {
     return 0;
 }
 
-static int sy_patch_ret(void *fn) {
-    if (!fn) return -1;
-    uint32_t code = 0xD65F03C0u;
-    if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
-    memcpy(fn, &code, sizeof(code));
-    sy_flush_icache(fn, sizeof(code));
-    sy_make_rx(fn, sizeof(code));
-    return 0;
-}
-
-#pragma mark - locate
-
-static int sy_tersafe_loaded(void) {
+static int sy_find_tersafe(void) {
     uint32_t c = _dyld_image_count();
     for (uint32_t i = 0; i < c; i++) {
         const char *name = _dyld_get_image_name(i);
         if (!name) continue;
-        if (strstr(name, "tersafe") || strstr(name, "Tersafe")) return 1;
+        if (!strstr(name, "tersafe") && !strstr(name, "Tersafe")) continue;
+        const struct mach_header *h = _dyld_get_image_header(i);
+        if (!h || h->magic != MH_MAGIC_64) continue;
+        sy_hdr = (const struct mach_header_64 *)h;
+        return 0;
     }
-    return 0;
+    return -1;
 }
 
 static void *sy_dlsym_tersafe(const char *name) {
-    void *p = dlsym(RTLD_DEFAULT, name);
-    if (p) return p;
+    if (sy_find_tersafe() != 0) return NULL;
     uint32_t c = _dyld_image_count();
     for (uint32_t i = 0; i < c; i++) {
         const char *img = _dyld_get_image_name(i);
         if (!img || (!strstr(img, "tersafe") && !strstr(img, "Tersafe"))) continue;
         void *h = dlopen(img, RTLD_NOLOAD);
         if (!h) continue;
-        p = dlsym(h, name);
+        void *p = dlsym(h, name);
         if (p) return p;
     }
     return NULL;
 }
-
-#pragma mark - fishhook 仅报告
-
-static void *orig_unused[8];
-static void *hook_null(void) { return NULL; }
-
-static void sy_fishhook_report_only(void) {
-    struct rebinding rb[] = {
-        { "TssSDKGetReportData",  (void *)hook_null, &orig_unused[0] },
-        { "TssSDKGetReportData2", (void *)hook_null, &orig_unused[1] },
-        { "TssSDKGetReportData3", (void *)hook_null, &orig_unused[2] },
-        { "TssSDKGetReportData4", (void *)hook_null, &orig_unused[3] },
-        { "tss_get_report_data",  (void *)hook_null, &orig_unused[4] },
-        { "tss_get_report_data2", (void *)hook_null, &orig_unused[5] },
-        { "tss_get_report_data3", (void *)hook_null, &orig_unused[6] },
-        { "tss_get_report_data4", (void *)hook_null, &orig_unused[7] },
-    };
-    rebind_symbols(rb, sizeof(rb) / sizeof(rb[0]));
-}
-
-#pragma mark - 浮条提示
 
 static UIWindow *sy_toast_window;
 
@@ -164,19 +137,17 @@ static void sy_show_toast(NSString *msg) {
             lab.textColor = UIColor.whiteColor;
             lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
             lab.layer.cornerRadius = 12;
-            lab.layer.masksToBounds = YES;
+            lab.clipsToBounds = YES;
             CGFloat pad = 16;
             CGFloat maxW = MIN(bounds.size.width, bounds.size.height) - 48;
             CGSize sz = [lab sizeThatFits:CGSizeMake(maxW, 400)];
             lab.frame = CGRectMake((bounds.size.width - sz.width - pad * 2) / 2,
                                    bounds.size.height * 0.18,
-                                   sz.width + pad * 2,
-                                   sz.height + pad);
+                                   sz.width + pad * 2, sz.height + pad);
             [vc.view addSubview:lab];
             w.hidden = NO;
             sy_toast_window = w;
             NSLog(@"[水溶C] %@", msg);
-
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 if (sy_toast_window == w) {
@@ -184,18 +155,19 @@ static void sy_show_toast(NSString *msg) {
                     sy_toast_window = nil;
                 }
             });
-        } @catch (__unused NSException *ex) {
-            NSLog(@"[水溶C] toast failed");
-        }
+        } @catch (__unused NSException *ex) {}
     });
 }
-
-#pragma mark - install
 
 void sy_install_report_hooks(void) {
     static int once = 0;
     if (once) return;
     once = 1;
+
+    if (sy_find_tersafe() != 0) {
+        sy_show_toast(@"水溶C：未找到 tersafe");
+        return;
+    }
 
     int exp = 0;
     static const char *exports[] = {
@@ -209,22 +181,8 @@ void sy_install_report_hooks(void) {
         void *fn = sy_dlsym_tersafe(exports[i]);
         if (fn && sy_patch_ret0(fn) == 0) exp++;
     }
-    void *en = sy_dlsym_tersafe("tss_enable_get_report_data");
-    if (en && sy_patch_ret(en) == 0) exp++;
 
-    sy_fishhook_report_only();
-
-    NSString *msg = [NSString stringWithFormat:
-                     @"水溶C：报告钩子已生效\n导出补丁 %d · 已挂导入表\n未打内部 RVA",
-                     exp];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        sy_show_toast(msg);
-    });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (!sy_toast_window) sy_show_toast(msg);
-    });
+    sy_show_toast([NSString stringWithFormat:@"水溶C：报告钩子已生效\n导出补丁 %d", exp]);
 }
 
 void sy_thread_chaos_start(void) {}
@@ -232,19 +190,18 @@ void sy_thread_chaos_start(void) {}
 __attribute__((constructor))
 static void sy_entry(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        for (int i = 0; i < 30; i++) {
+        int found = 0;
+        for (int i = 0; i < 60; i++) {
             sleep(1);
-            if (sy_tersafe_loaded() ||
-                sy_dlsym_tersafe("tss_get_report_data") ||
-                sy_dlsym_tersafe("TssSDKGetReportData")) {
-                sy_install_report_hooks();
-                return;
-            }
+            if (sy_find_tersafe() == 0) { found = 1; break; }
         }
-        sy_fishhook_report_only();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            sy_show_toast(@"水溶C：未找到 tersafe，仅挂导入表");
-        });
+        if (!found) {
+            sleep(2);
+            sy_show_toast(@"水溶C：未找到 tersafe");
+            return;
+        }
+        /* 等 ACE/游戏初始化过完再改码 */
+        sleep(20);
+        sy_install_report_hooks();
     });
 }

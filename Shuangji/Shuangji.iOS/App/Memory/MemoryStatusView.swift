@@ -4,15 +4,16 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("已恢复") {
-                    row("导出", "get_report* → 空")
-                    row("导入表", "fishhook 报告符号")
-                    row("提示", "进游戏后顶部浮条")
+                Section("当前策略（防闪）") {
+                    row("时机", "tersafe 出现后再等 20 秒")
+                    row("补丁", "仅 get_report* 导出")
+                    row("fishhook", "已关闭")
+                    row("提示", "补丁后顶部浮条")
                 }
-                Section("仍不做") {
-                    row("内部 RVA", "总闸/扫内存（易闪）")
-                    row("网络钩", "send/write")
-                    row("文件名", "sy_ports（非 Apollo）")
+                Section("说明") {
+                    Text("进游戏先应能正常玩约 20 秒，再出现「报告钩子已生效」。若一进就闪，把情况说下。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
                 }
             }
             .navigationTitle("内存")
@@ -24,7 +25,7 @@ struct MemoryStatusView: View {
         HStack {
             Text(k)
             Spacer()
-            Text(v).font(.caption).foregroundColor(.secondary).multilineTextAlignment(.trailing)
+            Text(v).font(.caption).foregroundColor(.secondary)
         }
     }
 }
