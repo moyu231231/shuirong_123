@@ -68,6 +68,7 @@ mkdir -p "$APP_PATH"
 clang -arch arm64 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
   -miphoneos-version-min=15.0 -O2 \
   -o "$APP_PATH/syinject" "$ROOT/Tools/syinject.c"
+chmod +x "$APP_PATH/syinject"
 # 把 dylib 放进资源（注入器用）
 DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
 if [[ -n "$DYLIB" ]]; then

@@ -1,7 +1,7 @@
 import Foundation
 
-/// 只注入包内固定 dylib（对齐 TrollFools：杀进程 → Frameworks → LC_LOAD → 伪签）。
-/// 不提供文件选择。Mach-O 改写由 Resources 内 `syinject` 完成。
+/// 只注入包内固定 dylib。
+/// 通过 root persona 跑 syinject deploy（对齐 TrollFools 的 cp/mkdir 提权写法）。
 enum BuiltinInjector {
 
     static let dylibFileName = "ShuiyongMem.dylib"
@@ -9,10 +9,12 @@ enum BuiltinInjector {
 
     enum InjectError: LocalizedError {
         case noDylib
+        case noHelper
         case failed(String)
         var errorDescription: String? {
             switch self {
             case .noDylib: return "缺少内置组件"
+            case .noHelper: return "缺少 syinject"
             case .failed(let s): return s
             }
         }
@@ -38,54 +40,47 @@ enum BuiltinInjector {
     }
 
     static func inject(into app: AppEntry) throws {
-        guard let dylib = bundledDylibURL, FileManager.default.fileExists(atPath: dylib.path) else {
-            throw InjectError.noDylib
-        }
+        guard let dylib = bundledDylibURL else { throw InjectError.noDylib }
+        guard let helper = helperURL() else { throw InjectError.noHelper }
         terminate(app: app)
 
-        let fwk = app.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
-        try FileManager.default.createDirectory(at: fwk, withIntermediateDirectories: true)
-        let dest = fwk.appendingPathComponent(dylibFileName)
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
-        }
-        try FileManager.default.copyItem(at: dylib, to: dest)
-
-        guard let exe = locateExecutable(in: app.bundleURL) else {
-            throw InjectError.failed("找不到可执行文件")
-        }
-
-        if let helper = helperURL() {
-            let code = SpawnUtil.run(helper.path, args: [
-                "inject",
-                "--app", app.bundleURL.path,
-                "--exe", exe.path,
-                "--dylib", dest.path,
-                "--rpath", "@executable_path/Frameworks"
-            ])
-            if code != 0 {
-                throw InjectError.failed("注入失败 (\(code))")
+        let result = SpawnUtil.rootRun(helper.path, args: [
+            "deploy",
+            "--app", app.bundleURL.path,
+            "--src", dylib.path,
+            "--name", dylibFileName
+        ])
+        if result.code != 0 {
+            let detail = [result.err, result.out]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty } ?? "code \(result.code)"
+            if result.code < 0 {
+                throw InjectError.failed("提权启动失败(\(result.code))，请确认用 TrollStore 安装")
             }
+            throw InjectError.failed(mapDeployError(result.code, detail: detail))
         }
-
-        let mark = fwk.appendingPathComponent(".sy_injected")
-        try Data("1".utf8).write(to: mark)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o644], ofItemAtPath: dest.path)
     }
 
     static func eject(from app: AppEntry) throws {
+        guard let helper = helperURL() else { throw InjectError.noHelper }
         terminate(app: app)
-        let fwk = app.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
-        let dest = fwk.appendingPathComponent(dylibFileName)
-        let mark = fwk.appendingPathComponent(".sy_injected")
-        try? FileManager.default.removeItem(at: dest)
-        try? FileManager.default.removeItem(at: mark)
+        let result = SpawnUtil.rootRun(helper.path, args: [
+            "eject",
+            "--app", app.bundleURL.path,
+            "--name", dylibFileName
+        ])
+        if result.code < 0 {
+            throw InjectError.failed("提权启动失败(\(result.code))，请确认用 TrollStore 安装")
+        }
+    }
 
-        if let helper = helperURL(), let exe = locateExecutable(in: app.bundleURL) {
-            _ = SpawnUtil.run(helper.path, args: [
-                "eject", "--exe", exe.path, "--name", dylibFileName
-            ])
+    private static func mapDeployError(_ code: Int32, detail: String) -> String {
+        switch code {
+        case 2: return "无法创建 Frameworks：\(detail)"
+        case 3: return "无法复制 dylib：\(detail)"
+        case 4: return "没有可注入的二进制（可能被加密保护）"
+        case 5: return "写入加载命令失败：\(detail)"
+        default: return "注入失败(\(code))：\(detail)"
         }
     }
 

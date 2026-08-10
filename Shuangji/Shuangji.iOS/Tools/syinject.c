@@ -1,18 +1,26 @@
 /*
- * Minimal LC_LOAD_DYLIB inserter. Built into the app by package.sh.
+ * Root helper: copy dylib into app Frameworks + insert LC_LOAD_DYLIB.
+ * Must be launched via persona root (SYSpawnRoot).
+ *
+ *   syinject deploy --app <App.app> --src <ShuiyongMem.dylib> [--exe <macho>]
+ *   syinject eject  --app <App.app> [--exe <macho>] --name ShuiyongMem.dylib
  *   syinject inject --exe <macho> --dylib @rpath/ShuiyongMem.dylib
- *   syinject eject  --exe <macho> --name ShuiyongMem.dylib
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
+#include <mach/machine.h>
 
 static int write_all(const char *path, const uint8_t *buf, size_t n) {
     FILE *f = fopen(path, "wb");
-    if (!f) return -1;
+    if (!f) { perror(path); return -1; }
     size_t w = fwrite(buf, 1, n, f);
     fclose(f);
     return w == n ? 0 : -1;
@@ -31,6 +39,95 @@ static uint8_t *read_all(const char *path, size_t *out_n) {
     fclose(f);
     *out_n = (size_t)sz;
     return b;
+}
+
+static int copy_file(const char *src, const char *dst) {
+    size_t n = 0;
+    uint8_t *b = read_all(src, &n);
+    if (!b) { perror(src); return -1; }
+    int rc = write_all(dst, b, n);
+    free(b);
+    if (rc == 0) chmod(dst, 0644);
+    return rc;
+}
+
+static int mkdir_p(const char *path) {
+    char tmp[1024];
+    size_t len = strlen(path);
+    if (len >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, len + 1);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    return mkdir(tmp, 0755) == 0 || errno == EEXIST ? 0 : -1;
+}
+
+static int is_encrypted_slice(uint8_t *base, size_t n) {
+    if (n < sizeof(struct mach_header_64)) return 1;
+    struct mach_header_64 *mh = (struct mach_header_64 *)base;
+    if (mh->magic != MH_MAGIC_64) return 1;
+    uint8_t *p = base + sizeof(*mh);
+    uint8_t *end = base + n;
+    for (uint32_t i = 0; i < mh->ncmds && p + 8 <= end; i++) {
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmdsize < 8 || p + lc->cmdsize > end) break;
+        if (lc->cmd == LC_ENCRYPTION_INFO_64) {
+            struct encryption_info_command_64 *ei = (struct encryption_info_command_64 *)lc;
+            return ei->cryptid != 0;
+        }
+        if (lc->cmd == LC_ENCRYPTION_INFO) {
+            struct encryption_info_command *ei = (struct encryption_info_command *)lc;
+            return ei->cryptid != 0;
+        }
+        p += lc->cmdsize;
+    }
+    return 0;
+}
+
+/* Prefer thin arm64; if FAT, pick arm64 slice into new buffer (caller frees). */
+static uint8_t *load_thin_arm64(const char *path, size_t *out_n, int *was_fat) {
+    size_t n = 0;
+    uint8_t *buf = read_all(path, &n);
+    if (!buf) return NULL;
+    *was_fat = 0;
+    uint32_t magic = *(uint32_t *)buf;
+    if (magic == MH_MAGIC_64) {
+        *out_n = n;
+        return buf;
+    }
+    if (magic != FAT_MAGIC && magic != FAT_CIGAM) {
+        free(buf);
+        return NULL;
+    }
+    *was_fat = 1;
+    struct fat_header fh;
+    memcpy(&fh, buf, sizeof(fh));
+    uint32_t nfat = (magic == FAT_CIGAM) ? __builtin_bswap32(fh.nfat_arch) : fh.nfat_arch;
+    struct fat_arch *archs = (struct fat_arch *)(buf + sizeof(struct fat_header));
+    for (uint32_t i = 0; i < nfat; i++) {
+        uint32_t cputype = archs[i].cputype;
+        uint32_t offset = archs[i].offset;
+        uint32_t size = archs[i].size;
+        if (magic == FAT_CIGAM) {
+            cputype = __builtin_bswap32(cputype);
+            offset = __builtin_bswap32(offset);
+            size = __builtin_bswap32(size);
+        }
+        if (cputype == CPU_TYPE_ARM64 && offset + size <= n) {
+            uint8_t *slice = (uint8_t *)malloc(size);
+            if (!slice) { free(buf); return NULL; }
+            memcpy(slice, buf + offset, size);
+            free(buf);
+            *out_n = size;
+            return slice;
+        }
+    }
+    free(buf);
+    return NULL;
 }
 
 static int has_dylib(uint8_t *base, size_t n, const char *needle) {
@@ -52,6 +149,42 @@ static int has_dylib(uint8_t *base, size_t n, const char *needle) {
     return 0;
 }
 
+static int ensure_rpath(uint8_t **pbuf, size_t *pn, const char *rpath) {
+    uint8_t *base = *pbuf;
+    size_t n = *pn;
+    struct mach_header_64 *mh = (struct mach_header_64 *)base;
+    uint8_t *p = base + sizeof(*mh);
+    uint8_t *end = base + n;
+    for (uint32_t i = 0; i < mh->ncmds && p + 8 <= end; i++) {
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmdsize < 8 || p + lc->cmdsize > end) break;
+        if (lc->cmd == LC_RPATH) {
+            struct rpath_command *rc = (struct rpath_command *)lc;
+            const char *s = (const char *)lc + rc->path.offset;
+            if (s < (const char *)end && strcmp(s, rpath) == 0) return 0;
+        }
+        p += lc->cmdsize;
+    }
+    size_t namelen = strlen(rpath) + 1;
+    size_t cmdsize = sizeof(struct rpath_command) + ((namelen + 7) & ~7ull);
+    size_t insert_at = sizeof(*mh) + mh->sizeofcmds;
+    size_t new_n = n + cmdsize;
+    uint8_t *nb = (uint8_t *)realloc(base, new_n);
+    if (!nb) return -1;
+    base = nb; *pbuf = nb; *pn = new_n;
+    mh = (struct mach_header_64 *)base;
+    memmove(base + insert_at + cmdsize, base + insert_at, n - insert_at);
+    memset(base + insert_at, 0, cmdsize);
+    struct rpath_command *rc = (struct rpath_command *)(base + insert_at);
+    rc->cmd = LC_RPATH;
+    rc->cmdsize = (uint32_t)cmdsize;
+    rc->path.offset = (uint32_t)sizeof(struct rpath_command);
+    memcpy((char *)rc + sizeof(struct rpath_command), rpath, namelen);
+    mh->ncmds += 1;
+    mh->sizeofcmds += (uint32_t)cmdsize;
+    return 0;
+}
+
 static int inject_one(uint8_t **pbuf, size_t *pn, const char *install_name, int weak) {
     uint8_t *base = *pbuf;
     size_t n = *pn;
@@ -60,7 +193,13 @@ static int inject_one(uint8_t **pbuf, size_t *pn, const char *install_name, int 
         fprintf(stderr, "need thin arm64 mach-o\n");
         return -1;
     }
+    if (is_encrypted_slice(base, n)) {
+        fprintf(stderr, "encrypted mach-o\n");
+        return -1;
+    }
     if (has_dylib(base, n, "ShuiyongMem.dylib")) return 0;
+    if (ensure_rpath(pbuf, pn, "@executable_path/Frameworks") != 0) return -1;
+    base = *pbuf; n = *pn; mh = (struct mach_header_64 *)base;
 
     size_t namelen = strlen(install_name) + 1;
     size_t cmdsize = sizeof(struct dylib_command) + ((namelen + 7) & ~7ull);
@@ -110,47 +249,194 @@ static int eject_one(uint8_t *base, size_t n, const char *name) {
     return 0;
 }
 
+static int patch_macho(const char *path, int do_inject, const char *install_or_name, int weak) {
+    int was_fat = 0;
+    size_t n = 0;
+    uint8_t *buf = load_thin_arm64(path, &n, &was_fat);
+    if (!buf) { fprintf(stderr, "read fail %s\n", path); return -1; }
+    if (was_fat) {
+        fprintf(stderr, "fat binary not rewritten in-place: %s\n", path);
+        free(buf);
+        return -1;
+    }
+    int rc;
+    if (do_inject) rc = inject_one(&buf, &n, install_or_name, weak);
+    else rc = eject_one(buf, n, install_or_name);
+    if (rc == 0) rc = write_all(path, buf, n);
+    free(buf);
+    return rc;
+}
+
+static int plist_executable(const char *app, char *out, size_t outn) {
+    char plist[1024];
+    snprintf(plist, sizeof(plist), "%s/Info.plist", app);
+    /* crude scan for CFBundleExecutable string – prefer using path from caller */
+    FILE *f = fopen(plist, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 2 * 1024 * 1024) { fclose(f); return -1; }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return -1; }
+    fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[sz] = 0;
+    const char *key = "CFBundleExecutable";
+    char *p = strstr(buf, key);
+    if (!p) { free(buf); return -1; }
+    p = strstr(p, "<string>");
+    if (!p) { free(buf); return -1; }
+    p += 8;
+    char *e = strstr(p, "</string>");
+    if (!e || (size_t)(e - p) >= outn) { free(buf); return -1; }
+    memcpy(out, p, (size_t)(e - p));
+    out[e - p] = 0;
+    free(buf);
+    return 0;
+}
+
+static int try_candidate(const char *path, char *best, size_t bestn, size_t *best_size) {
+    size_t n = 0;
+    int was_fat = 0;
+    uint8_t *buf = load_thin_arm64(path, &n, &was_fat);
+    if (!buf) return 0;
+    int ok = (!was_fat && !is_encrypted_slice(buf, n));
+    free(buf);
+    if (!ok) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    if (*best_size == 0 || (size_t)st.st_size < *best_size) {
+        snprintf(best, bestn, "%s", path);
+        *best_size = (size_t)st.st_size;
+    }
+    return 1;
+}
+
+static int find_inject_target(const char *app, char *out, size_t outn) {
+    char best[1024] = {0};
+    size_t best_size = 0;
+    char fwkroot[1024];
+    snprintf(fwkroot, sizeof(fwkroot), "%s/Frameworks", app);
+    DIR *d = opendir(fwkroot);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (!strstr(ent->d_name, ".framework")) continue;
+            char name[256];
+            snprintf(name, sizeof(name), "%s", ent->d_name);
+            char *dot = strstr(name, ".framework");
+            if (dot) *dot = 0;
+            char cand[1200];
+            snprintf(cand, sizeof(cand), "%s/%s.framework/%s", fwkroot, name, name);
+            try_candidate(cand, best, sizeof(best), &best_size);
+        }
+        closedir(d);
+    }
+    if (best[0]) {
+        snprintf(out, outn, "%s", best);
+        return 0;
+    }
+    char exe[256];
+    if (plist_executable(app, exe, sizeof(exe)) == 0) {
+        char cand[1200];
+        snprintf(cand, sizeof(cand), "%s/%s", app, exe);
+        if (try_candidate(cand, best, sizeof(best), &best_size) && best[0]) {
+            snprintf(out, outn, "%s", best);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void chown_installd(const char *path) {
+    /* 33 = _installd */
+    chown(path, 33, 33);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject inject --exe PATH --dylib @rpath/ShuiyongMem.dylib\n");
+        fprintf(stderr, "syinject deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
+    const char *app = NULL;
+    const char *src = NULL;
     const char *exe = NULL;
     const char *dylib = "@rpath/ShuiyongMem.dylib";
     const char *name = "ShuiyongMem.dylib";
     int weak = 0;
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
+        if (!strcmp(argv[i], "--app") && i + 1 < argc) app = argv[++i];
+        else if (!strcmp(argv[i], "--src") && i + 1 < argc) src = argv[++i];
+        else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--dylib") && i + 1 < argc) dylib = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--weak")) weak = 1;
-        else if (!strcmp(argv[i], "--app") || !strcmp(argv[i], "--rpath")) {
-            if (i + 1 < argc) i++;
-        }
+        else if (!strcmp(argv[i], "--rpath") && i + 1 < argc) i++;
     }
-    if (!exe) { fprintf(stderr, "need --exe\n"); return 1; }
 
-    size_t n = 0;
-    uint8_t *buf = read_all(exe, &n);
-    if (!buf) { perror("read"); return 1; }
+    if (!strcmp(mode, "deploy")) {
+        if (!app || !src) { fprintf(stderr, "need --app --src\n"); return 1; }
+        char fwk[1100];
+        snprintf(fwk, sizeof(fwk), "%s/Frameworks", app);
+        if (mkdir_p(fwk) != 0) { perror("mkdir Frameworks"); return 2; }
+        char dest[1200];
+        snprintf(dest, sizeof(dest), "%s/%s", fwk, name);
+        unlink(dest);
+        if (copy_file(src, dest) != 0) return 3;
+        chown_installd(dest);
 
-    int rc = 1;
+        char target[1200];
+        if (exe) snprintf(target, sizeof(target), "%s", exe);
+        else if (find_inject_target(app, target, sizeof(target)) != 0) {
+            fprintf(stderr, "no injectable mach-o\n");
+            return 4;
+        }
+        char install[512];
+        snprintf(install, sizeof(install), "@rpath/%s", name);
+        if (patch_macho(target, 1, install, weak) != 0) return 5;
+        chown_installd(target);
+
+        char mark[1200];
+        snprintf(mark, sizeof(mark), "%s/.sy_injected", fwk);
+        FILE *mf = fopen(mark, "wb");
+        if (mf) { fputs("1", mf); fclose(mf); chown_installd(mark); }
+        fprintf(stdout, "ok %s\n", target);
+        return 0;
+    }
+
+    if (!strcmp(mode, "eject")) {
+        if (!app) { fprintf(stderr, "need --app\n"); return 1; }
+        char fwk[1100];
+        snprintf(fwk, sizeof(fwk), "%s/Frameworks", app);
+        char dest[1200];
+        snprintf(dest, sizeof(dest), "%s/%s", fwk, name);
+        unlink(dest);
+        char mark[1200];
+        snprintf(mark, sizeof(mark), "%s/.sy_injected", fwk);
+        unlink(mark);
+
+        char target[1200];
+        if (exe) snprintf(target, sizeof(target), "%s", exe);
+        else if (find_inject_target(app, target, sizeof(target)) != 0) return 0;
+        patch_macho(target, 0, name, 0);
+        return 0;
+    }
+
     if (!strcmp(mode, "inject")) {
-        char tmp[512];
-        const char *install = dylib;
+        if (!exe) { fprintf(stderr, "need --exe\n"); return 1; }
+        char install[512];
+        const char *use = dylib;
         if (strchr(dylib, '/')) {
             const char *base = strrchr(dylib, '/');
             base = base ? base + 1 : dylib;
-            snprintf(tmp, sizeof(tmp), "@rpath/%s", base);
-            install = tmp;
+            snprintf(install, sizeof(install), "@rpath/%s", base);
+            use = install;
         }
-        rc = inject_one(&buf, &n, install, weak);
-        if (rc == 0) rc = write_all(exe, buf, n);
-    } else if (!strcmp(mode, "eject")) {
-        rc = eject_one(buf, n, name);
-        if (rc == 0) rc = write_all(exe, buf, n);
+        return patch_macho(exe, 1, use, weak) == 0 ? 0 : 1;
     }
-    free(buf);
-    return rc ? 1 : 0;
+
+    fprintf(stderr, "unknown mode\n");
+    return 1;
 }
