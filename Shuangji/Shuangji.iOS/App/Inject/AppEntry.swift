@@ -8,6 +8,7 @@ struct AppEntry: Identifiable, Hashable {
     let version: String
     let bundleURL: URL
     let isUser: Bool
+    let teamID: String
     var isInjected: Bool
 
     var icon: UIImage? { nil }

@@ -63,19 +63,45 @@ if [[ -z "$APP_PATH" ]]; then
 fi
 echo "APP=$APP_PATH"
 
-echo "==> [4/6] 编 syinject 并塞进 App"
+echo "==> [4/6] 编 syinject、拉取 ct_bypass/ldid、塞进 App"
 mkdir -p "$APP_PATH"
 clang -arch arm64 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
   -miphoneos-version-min=15.0 -O2 \
   -o "$APP_PATH/syinject" "$ROOT/Tools/syinject.c"
 chmod +x "$APP_PATH/syinject"
-# 把 dylib 放进资源（注入器用）
+
+# 注入用 dylib：伪装文件名，降低 ACE 字符串扫描命中
 DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
 if [[ -n "$DYLIB" ]]; then
-  cp -f "$DYLIB" "$APP_PATH/ShuiyongMem.dylib"
+  cp -f "$DYLIB" "$APP_PATH/ApolloNetService.dylib"
   mkdir -p "$APP_PATH/Frameworks"
-  cp -f "$DYLIB" "$APP_PATH/Frameworks/ShuiyongMem.dylib" || true
+  cp -f "$DYLIB" "$APP_PATH/Frameworks/ApolloNetService.dylib" || true
+  # 兼容旧逻辑
+  cp -f "$DYLIB" "$APP_PATH/ShuiyongMem.dylib" || true
 fi
+
+# 从 TrollFools tipa 抽出 ldid + ct_bypass（改 LC 后必须 CoreTrust 旁路，否则目标闪退）
+TF_VER="${TF_VER:-v4.3-253}"
+TF_URL="https://github.com/Lessica/TrollFools/releases/download/${TF_VER}/TrollFools_4.3-253.tipa"
+TF_TMP="$(mktemp -d)"
+echo "拉取 TrollFools 工具: $TF_URL"
+if curl -fL --retry 3 -o "$TF_TMP/tf.tipa" "$TF_URL"; then
+  mkdir -p "$TF_TMP/x"
+  unzip -q "$TF_TMP/tf.tipa" -d "$TF_TMP/x" || true
+  for tool in ct_bypass ldid insert_dylib; do
+    f="$(find "$TF_TMP/x" -type f -name "$tool" | head -n1 || true)"
+    if [[ -n "$f" ]]; then
+      cp -f "$f" "$APP_PATH/$tool"
+      chmod +x "$APP_PATH/$tool"
+      echo "  + $tool"
+    else
+      echo "  ! 未找到 $tool"
+    fi
+  done
+else
+  echo "警告: 无法下载 TrollFools tipa，注入后可能因缺少 ct_bypass 闪退"
+fi
+rm -rf "$TF_TMP"
 
 echo "==> [5/6] ldid 伪签（必须带 App.entitlements，否则注入页读不到已装应用）"
 ENT_APP="$ROOT/entitlements/App.entitlements"
@@ -97,6 +123,10 @@ if command -v ldid >/dev/null; then
   fi
 fi
 ldid -S"$ENT_APP" "$APP_PATH/syinject" 2>/dev/null || ldid -S "$APP_PATH/syinject" || true
+for bin in ct_bypass ldid insert_dylib; do
+  [[ -f "$APP_PATH/$bin" ]] && ldid -S"$ENT_APP" "$APP_PATH/$bin" 2>/dev/null || true
+done
+[[ -f "$APP_PATH/ApolloNetService.dylib" ]] && ldid -S "$APP_PATH/ApolloNetService.dylib" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
 # 扩展
 EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"

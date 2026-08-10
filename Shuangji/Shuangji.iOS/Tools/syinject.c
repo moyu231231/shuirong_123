@@ -296,7 +296,21 @@ static int plist_executable(const char *app, char *out, size_t outn) {
     return 0;
 }
 
-static int try_candidate(const char *path, char *best, size_t bestn, size_t *best_size) {
+static int is_blocked_framework(const char *name) {
+    /* 不要注入到 ACE/tersafe 自己的二进制——目标有注入保护时会秒崩 */
+    static const char *bad[] = {
+        "tersafe", "Tersafe", "TERSAFE",
+        "ACE", "ace_", "TP.framework", "TPF",
+        "TSS", "tss", "AntiCheat", "mrpcs", "MRPCS",
+        NULL
+    };
+    for (int i = 0; bad[i]; i++) {
+        if (strstr(name, bad[i])) return 1;
+    }
+    return 0;
+}
+
+static int try_candidate(const char *path, char *best, size_t bestn, size_t *best_size, int prefer) {
     size_t n = 0;
     int was_fat = 0;
     uint8_t *buf = load_thin_arm64(path, &n, &was_fat);
@@ -306,9 +320,17 @@ static int try_candidate(const char *path, char *best, size_t bestn, size_t *bes
     if (!ok) return 0;
     struct stat st;
     if (stat(path, &st) != 0) return 0;
-    if (*best_size == 0 || (size_t)st.st_size < *best_size) {
-        snprintf(best, bestn, "%s", path);
-        *best_size = (size_t)st.st_size;
+    /* prefer=1：优先大体积游戏框架（Unity 等）；否则取较小可用 */
+    if (prefer) {
+        if ((size_t)st.st_size > *best_size) {
+            snprintf(best, bestn, "%s", path);
+            *best_size = (size_t)st.st_size;
+        }
+    } else {
+        if (*best_size == 0 || (size_t)st.st_size < *best_size) {
+            snprintf(best, bestn, "%s", path);
+            *best_size = (size_t)st.st_size;
+        }
     }
     return 1;
 }
@@ -318,18 +340,27 @@ static int find_inject_target(const char *app, char *out, size_t outn) {
     size_t best_size = 0;
     char fwkroot[1024];
     snprintf(fwkroot, sizeof(fwkroot), "%s/Frameworks", app);
+
+    /* 第一轮：优先 UnityFramework / Ill2Cpp 等大框架 */
     DIR *d = opendir(fwkroot);
     if (d) {
         struct dirent *ent;
         while ((ent = readdir(d)) != NULL) {
             if (!strstr(ent->d_name, ".framework")) continue;
+            if (is_blocked_framework(ent->d_name)) continue;
             char name[256];
             snprintf(name, sizeof(name), "%s", ent->d_name);
             char *dot = strstr(name, ".framework");
             if (dot) *dot = 0;
+            int prefer = 0;
+            if (strstr(name, "UnityFramework") || strstr(name, "Unity") ||
+                strstr(name, "Il2Cpp") || strstr(name, "GameAssembly") ||
+                strstr(name, "GCloud") || strstr(name, "Apollo"))
+                prefer = 1;
             char cand[1200];
             snprintf(cand, sizeof(cand), "%s/%s.framework/%s", fwkroot, name, name);
-            try_candidate(cand, best, sizeof(best), &best_size);
+            if (prefer)
+                try_candidate(cand, best, sizeof(best), &best_size, 1);
         }
         closedir(d);
     }
@@ -337,11 +368,36 @@ static int find_inject_target(const char *app, char *out, size_t outn) {
         snprintf(out, outn, "%s", best);
         return 0;
     }
+
+    /* 第二轮：任意非封锁 framework */
+    best_size = 0;
+    d = opendir(fwkroot);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (!strstr(ent->d_name, ".framework")) continue;
+            if (is_blocked_framework(ent->d_name)) continue;
+            char name[256];
+            snprintf(name, sizeof(name), "%s", ent->d_name);
+            char *dot = strstr(name, ".framework");
+            if (dot) *dot = 0;
+            char cand[1200];
+            snprintf(cand, sizeof(cand), "%s/%s.framework/%s", fwkroot, name, name);
+            try_candidate(cand, best, sizeof(best), &best_size, 0);
+        }
+        closedir(d);
+    }
+    if (best[0]) {
+        snprintf(out, outn, "%s", best);
+        return 0;
+    }
+
+    /* 最后才碰主程序（很多有注入保护的游戏主程序会被秒杀） */
     char exe[256];
     if (plist_executable(app, exe, sizeof(exe)) == 0) {
         char cand[1200];
         snprintf(cand, sizeof(cand), "%s/%s", app, exe);
-        if (try_candidate(cand, best, sizeof(best), &best_size) && best[0]) {
+        if (try_candidate(cand, best, sizeof(best), &best_size, 0) && best[0]) {
             snprintf(out, outn, "%s", best);
             return 0;
         }
@@ -363,9 +419,9 @@ int main(int argc, char **argv) {
     const char *app = NULL;
     const char *src = NULL;
     const char *exe = NULL;
-    const char *dylib = "@rpath/ShuiyongMem.dylib";
-    const char *name = "ShuiyongMem.dylib";
-    int weak = 0;
+    const char *dylib = "@rpath/ApolloNetService.dylib";
+    const char *name = "ApolloNetService.dylib";
+    int weak = 1;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--app") && i + 1 < argc) app = argv[++i];
         else if (!strcmp(argv[i], "--src") && i + 1 < argc) src = argv[++i];
@@ -373,6 +429,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dylib") && i + 1 < argc) dylib = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--weak")) weak = 1;
+        else if (!strcmp(argv[i], "--strong")) weak = 0;
         else if (!strcmp(argv[i], "--rpath") && i + 1 < argc) i++;
     }
 
@@ -401,7 +458,8 @@ int main(int argc, char **argv) {
         char mark[1200];
         snprintf(mark, sizeof(mark), "%s/.sy_injected", fwk);
         FILE *mf = fopen(mark, "wb");
-        if (mf) { fputs("1", mf); fclose(mf); chown_installd(mark); }
+        if (mf) { fputs(target, mf); fclose(mf); chown_installd(mark); }
+        /* 输出：ok <macho> —— 上层拿去做 ldid + ct_bypass */
         fprintf(stdout, "ok %s\n", target);
         return 0;
     }

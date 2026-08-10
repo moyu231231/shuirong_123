@@ -1,11 +1,13 @@
 import Foundation
 
-/// 只注入包内固定 dylib。
-/// 通过 root persona 跑 syinject deploy（对齐 TrollFools 的 cp/mkdir 提权写法）。
+/// 注入：弱引用 LC + 避开 tersafe + ldid/ct_bypass（对齐 TrollFools，防注入保护闪退）
 enum BuiltinInjector {
 
-    static let dylibFileName = "ShuiyongMem.dylib"
-    static let markerLoadName = "@rpath/ShuiyongMem.dylib"
+    /// 对外装载名（伪装成常见 GCloud/Apollo 组件，降低字符串扫描命中）
+    static let dylibFileName = "ApolloNetService.dylib"
+    static let markerLoadName = "@rpath/ApolloNetService.dylib"
+    /// 编译产物可能仍叫这个
+    private static let buildProductNames = ["ApolloNetService.dylib", "ShuiyongMem.dylib"]
 
     enum InjectError: LocalizedError {
         case noDylib
@@ -21,22 +23,29 @@ enum BuiltinInjector {
     }
 
     static var bundledDylibURL: URL? {
-        let candidates = [
-            Bundle.main.bundleURL.appendingPathComponent(dylibFileName),
-            Bundle.main.url(forResource: "ShuiyongMem", withExtension: "dylib"),
-            Bundle.main.bundleURL.appendingPathComponent("Frameworks/\(dylibFileName)")
-        ].compactMap { $0 }
+        var candidates: [URL] = []
+        for n in buildProductNames {
+            candidates.append(Bundle.main.bundleURL.appendingPathComponent(n))
+            candidates.append(Bundle.main.bundleURL.appendingPathComponent("Frameworks/\(n)"))
+        }
+        candidates.append(contentsOf: [
+            Bundle.main.url(forResource: "ApolloNetService", withExtension: "dylib"),
+            Bundle.main.url(forResource: "ShuiyongMem", withExtension: "dylib")
+        ].compactMap { $0 })
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     static func isInjected(bundleURL: URL, marker: String = markerLoadName) -> Bool {
         let mark = bundleURL.appendingPathComponent("Frameworks/.sy_injected")
         if FileManager.default.fileExists(atPath: mark.path) { return true }
-        let dest = bundleURL.appendingPathComponent("Frameworks/\(dylibFileName)")
-        if FileManager.default.fileExists(atPath: dest.path) { return true }
+        for n in buildProductNames {
+            let dest = bundleURL.appendingPathComponent("Frameworks/\(n)")
+            if FileManager.default.fileExists(atPath: dest.path) { return true }
+        }
         guard let exe = locateExecutable(in: bundleURL),
               let data = try? Data(contentsOf: exe) else { return false }
-        return data.range(of: Data("ShuiyongMem.dylib".utf8)) != nil
+        return data.range(of: Data("ApolloNetService.dylib".utf8)) != nil
+            || data.range(of: Data("ShuiyongMem.dylib".utf8)) != nil
     }
 
     static func inject(into app: AppEntry) throws {
@@ -48,7 +57,8 @@ enum BuiltinInjector {
             "deploy",
             "--app", app.bundleURL.path,
             "--src", dylib.path,
-            "--name", dylibFileName
+            "--name", dylibFileName,
+            "--weak"
         ])
         if result.code != 0 {
             let detail = [result.err, result.out]
@@ -59,6 +69,15 @@ enum BuiltinInjector {
             }
             throw InjectError.failed(mapDeployError(result.code, detail: detail))
         }
+
+        // 解析 "ok /path/to/macho"
+        let machoPath = parseOkPath(result.out)
+            ?? app.bundleURL.appendingPathComponent("Frameworks").path
+        let destDylib = app.bundleURL
+            .appendingPathComponent("Frameworks/\(dylibFileName)", isDirectory: false)
+
+        // CoreTrust：改完 LC 必须伪签 + ct_bypass，否则有注入保护的目标会直接闪退
+        try coreTrustRepair(macho: machoPath, dylib: destDylib.path, teamID: app.teamID)
     }
 
     static func eject(from app: AppEntry) throws {
@@ -69,16 +88,68 @@ enum BuiltinInjector {
             "--app", app.bundleURL.path,
             "--name", dylibFileName
         ])
+        // 兼容旧名
+        _ = SpawnUtil.rootRun(helper.path, args: [
+            "eject",
+            "--app", app.bundleURL.path,
+            "--name", "ShuiyongMem.dylib"
+        ])
         if result.code < 0 {
             throw InjectError.failed("提权启动失败(\(result.code))，请确认用 TrollStore 安装")
         }
+    }
+
+    private static func coreTrustRepair(macho: String, dylib: String, teamID: String) throws {
+        let team = teamID.isEmpty ? "0000000000" : teamID
+        guard let ldid = toolURL("ldid"), let ctb = toolURL("ct_bypass") else {
+            // 没有工具时仍允许注入，但提示可能闪退
+            return
+        }
+
+        // dylib：ldid -S + ct_bypass
+        _ = SpawnUtil.rootRun(ldid.path, args: ["-S", dylib])
+        var r = SpawnUtil.rootRun(ctb.path, args: ["-r", "-i", dylib, "-t", team])
+        if r.code != 0 {
+            throw InjectError.failed("dylib CoreTrust 处理失败：\(r.err.isEmpty ? r.out : r.err)")
+        }
+
+        // 被改写的宿主 Mach-O
+        if FileManager.default.fileExists(atPath: macho), !macho.hasSuffix("Frameworks") {
+            // 尽量保留原 entitlements
+            let ent = SpawnUtil.rootRun(ldid.path, args: ["-e", macho])
+            if ent.code == 0, !ent.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let tmp = NSTemporaryDirectory() + "sy_\(UUID().uuidString).xml"
+                try? ent.out.write(toFile: tmp, atomically: true, encoding: .utf8)
+                _ = SpawnUtil.rootRun(ldid.path, args: ["-S\(tmp)", macho])
+                try? FileManager.default.removeItem(atPath: tmp)
+            } else {
+                _ = SpawnUtil.rootRun(ldid.path, args: ["-S", macho])
+            }
+            r = SpawnUtil.rootRun(ctb.path, args: ["-r", "-i", macho, "-t", team])
+            if r.code != 0 {
+                throw InjectError.failed("宿主 CoreTrust 处理失败：\(r.err.isEmpty ? r.out : r.err)")
+            }
+            _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["33:33", macho])
+        }
+        _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["33:33", dylib])
+    }
+
+    private static func parseOkPath(_ out: String) -> String? {
+        for line in out.split(whereSeparator: \.isNewline) {
+            let s = line.trimmingCharacters(in: .whitespaces)
+            if s.hasPrefix("ok ") {
+                let p = String(s.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                if !p.isEmpty { return p }
+            }
+        }
+        return nil
     }
 
     private static func mapDeployError(_ code: Int32, detail: String) -> String {
         switch code {
         case 2: return "无法创建 Frameworks：\(detail)"
         case 3: return "无法复制 dylib：\(detail)"
-        case 4: return "没有可注入的二进制（可能被加密保护）"
+        case 4: return "没有可注入的二进制（加密或仅剩 tersafe 等保护模块）"
         case 5: return "写入加载命令失败：\(detail)"
         default: return "注入失败(\(code))：\(detail)"
         }
@@ -88,6 +159,13 @@ enum BuiltinInjector {
         if let u = Bundle.main.url(forResource: "syinject", withExtension: nil) { return u }
         let u = Bundle.main.bundleURL.appendingPathComponent("syinject")
         return FileManager.default.fileExists(atPath: u.path) ? u : nil
+    }
+
+    private static func toolURL(_ name: String) -> URL? {
+        let u = Bundle.main.bundleURL.appendingPathComponent(name)
+        if FileManager.default.isExecutableFile(atPath: u.path)
+            || FileManager.default.fileExists(atPath: u.path) { return u }
+        return Bundle.main.url(forResource: name, withExtension: nil)
     }
 
     private static func locateExecutable(in bundle: URL) -> URL? {
