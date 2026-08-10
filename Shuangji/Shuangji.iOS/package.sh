@@ -11,19 +11,24 @@ DERIVED="$ROOT/.build"
 SDK="${SDK:-iphoneos}"
 
 echo "==> [1/6] 检查工具"
+export HOMEBREW_NO_REQUIRE_TAP_TRUST="${HOMEBREW_NO_REQUIRE_TAP_TRUST:-1}"
+brew untap aws/tap 2>/dev/null || true
 if ! command -v xcodebuild >/dev/null; then
   echo "需要 Xcode 命令行工具"; exit 1
 fi
 if ! command -v xcodegen >/dev/null; then
   echo "安装 xcodegen..."
-  brew install xcodegen
+  brew install xcodegen || true
+fi
+if ! command -v xcodegen >/dev/null; then
+  echo "缺少 xcodegen（请先在 CI 步骤安装）"; exit 1
 fi
 if ! command -v ldid >/dev/null; then
   echo "安装 ldid..."
   brew install ldid || brew install ldid-procursus || true
 fi
 if ! command -v ldid >/dev/null; then
-  echo "请先安装 ldid: brew install ldid"; exit 1
+  echo "缺少 ldid（请先在 CI 步骤安装）"; exit 1
 fi
 
 echo "==> [2/6] 生成工程"
