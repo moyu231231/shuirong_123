@@ -131,7 +131,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "注入完成"
                     alertTitle = "注入成功"
-                    alertMsg = "已写入 \(app.name)。\n请重新打开游戏，约 1～3 秒后若钩子生效会再弹「水溶C」提示窗。"
+                    alertMsg = "已写入 \(app.name)。\n请先完全退出游戏再打开（运行中注入无效）。\n进游戏数秒后应弹出「报告钩子已生效」。"
                     showAlert = true
                     reload()
                 }

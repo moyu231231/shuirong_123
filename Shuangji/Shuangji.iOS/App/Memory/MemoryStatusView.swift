@@ -4,17 +4,19 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("当前策略") {
-                    row("库", BuiltinInjector.dylibFileName)
-                    row("取数", "get_report* → 空")
-                    row("发送", "send/sendto 吞 4013")
-                    row("开关", "enable_get_report 禁用")
-                    row("入站", "不补丁 rcv_anti（防闪）")
+                Section("IDA 定点（tersafe 7.7.49）") {
+                    row("导出", "get_report* / enable → 空")
+                    row("上报", "COREREPORT / TDM / shell")
+                    row("总闸", "0x10E36C ms 控制块 RET0")
+                    row("隐藏", "vm扫描 / shadowed / bin_patch / md5")
+                }
+                Section("明确不做") {
+                    row("线程", "不挂起、不扫线程名")
+                    row("网络", "不钩 send/write")
+                    row("用法", "退游戏→注入→再开")
                 }
                 Section("成功标志") {
-                    Text("注入成功：本 App 弹窗「注入成功」")
-                        .font(.footnote)
-                    Text("钩子成功：进游戏后弹「水溶C / 内存钩子已生效」")
+                    Text("进游戏数秒后弹窗：报告/检测补丁已生效（含各项计数）")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
@@ -28,7 +30,7 @@ struct MemoryStatusView: View {
         HStack {
             Text(k)
             Spacer()
-            Text(v).foregroundColor(.secondary).multilineTextAlignment(.trailing)
+            Text(v).font(.caption).foregroundColor(.secondary).multilineTextAlignment(.trailing)
         }
     }
 }
