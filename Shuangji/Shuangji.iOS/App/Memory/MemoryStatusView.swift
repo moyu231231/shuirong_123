@@ -14,7 +14,7 @@ struct MemoryStatusView: View {
             List {
                 Section("当前") {
                     row("机器码补丁", "已关闭（会闪）")
-                    row("fishhook", "仅报告导入")
+                    row("fishhook", "报告 + OnRecv/anti_data")
                     row("提示", "游戏内悬浮窗")
                 }
                 Section("检查") {

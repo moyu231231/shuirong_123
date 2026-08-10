@@ -11,11 +11,9 @@
 #import "fishhook.h"
 
 /*
- * 闪退原因：对 tersafe 做 TEXT/vm_protect 改码（get_report* RET0）→ 已去掉。
- * 保留：
- *   ✓ fishhook 仅重绑报告导入（不改 tersafe 机器码）
- *   ✓ 悬浮窗提示
- *   ✓ 状态文件供「检查补丁」
+ * 不改 tersafe 机器码。fishhook 导入表：
+ *   上报：get_report* / TssSDKGetReportData*
+ *   检测下发：TssSDKOnRecvData / tss_sdk_rcv_anti_data
  */
 
 #define SY_STATUS_PATH "/var/mobile/Library/Caches/sy_ports_status.txt"
@@ -36,8 +34,10 @@ static void sy_write_status(const char *line) {
 
 #pragma mark - fishhook（不改 TEXT）
 
-static void *orig_unused[8];
+static void *orig_unused[10];
 static void *hook_null(void) { return NULL; }
+/* 收包类：当 int 返回 0 / void 忽略均可 */
+static int hook_recv_nop(void) { return 0; }
 
 static void sy_fishhook_report_only(void) {
     struct rebinding rb[] = {
@@ -49,6 +49,8 @@ static void sy_fishhook_report_only(void) {
         { "tss_get_report_data2", (void *)hook_null, &orig_unused[5] },
         { "tss_get_report_data3", (void *)hook_null, &orig_unused[6] },
         { "tss_get_report_data4", (void *)hook_null, &orig_unused[7] },
+        { "TssSDKOnRecvData",     (void *)hook_recv_nop, &orig_unused[8] },
+        { "tss_sdk_rcv_anti_data", (void *)hook_recv_nop, &orig_unused[9] },
     };
     rebind_symbols(rb, sizeof(rb) / sizeof(rb[0]));
 }
@@ -135,10 +137,10 @@ void sy_install_report_hooks(void) {
     sy_fishhook_report_only();
 
     char buf[128];
-    snprintf(buf, sizeof(buf), "OK fishhook=report time=%ld", (long)time(NULL));
+    snprintf(buf, sizeof(buf), "OK fishhook=report+recv time=%ld", (long)time(NULL));
     sy_write_status(buf);
 
-    sy_show_toast(@"水溶C：报告钩子已生效\n(fishhook，未改机器码)");
+    sy_show_toast(@"水溶C：钩子已生效\n报告 + 检测收包\n(fishhook，未改机器码)");
 }
 
 void sy_thread_chaos_start(void) {}
@@ -151,7 +153,9 @@ static void sy_entry(void) {
             sleep(1);
             if (sy_tersafe_loaded() ||
                 dlsym(RTLD_DEFAULT, "tss_get_report_data") ||
-                dlsym(RTLD_DEFAULT, "TssSDKGetReportData")) {
+                dlsym(RTLD_DEFAULT, "TssSDKGetReportData") ||
+                dlsym(RTLD_DEFAULT, "TssSDKOnRecvData") ||
+                dlsym(RTLD_DEFAULT, "tss_sdk_rcv_anti_data")) {
                 sleep(3);
                 sy_install_report_hooks();
                 return;
