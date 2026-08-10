@@ -1,27 +1,32 @@
-/*
- * 无 dylib 远程内存补丁：
- *   task_for_pid → 枚举 dyld → 解析 tersafe 导出 →
- *   1) 分配匿名桩 (MOV X0,#0; RET)
- *   2) 其它镜像 __DATA 里指向这些导出的指针改写到桩（等同 fishhook，不改 TEXT）
- *   3) 再写导出 prologue（挡住内部 BL；先 task_suspend 降竞态）
- * 不 dlopen、不落盘、不新增命名镜像。
+﻿/*
+ * Remote mempatch without dylib:
+ *   task_for_pid -> dyld images -> resolve tersafe exports ->
+ *   1) allocate anon stub (MOV X0,#0; RET)
+ *   2) rewrite other images' DATA pointers to stub (fishhook-like)
+ *   3) patch export prologues (block internal BL; task_suspend first)
+ * No dlopen, no on-disk payload, no new named image.
  *
  *   sy_mempatch <pid>
+ *
+ * Uses public vm_* APIs (mach_vm_* often undeclared in iphoneos SDK).
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <mach-o/dyld_images.h>
 #include <sys/stat.h>
 #include <time.h>
 
+typedef vm_address_t raddr_t;
+typedef vm_size_t rsize_t;
+
 #define STATUS_PATH "/var/mobile/Library/Caches/sy_ports_status.txt"
-#define PAGE_MASK   ((mach_vm_address_t)0x3FFFu)
+#define PAGE_MASK   ((raddr_t)0x3FFFu)
 
 static void write_status(const char *line) {
     mkdir("/var/mobile/Library/Caches", 0755);
@@ -32,36 +37,36 @@ static void write_status(const char *line) {
     fclose(f);
 }
 
-static kern_return_t tread(task_t task, mach_vm_address_t addr, void *buf, mach_vm_size_t sz) {
-    mach_vm_size_t out = 0;
-    return mach_vm_read_overwrite(task, addr, sz, (mach_vm_address_t)(uintptr_t)buf, &out);
+static kern_return_t tread(task_t task, raddr_t addr, void *buf, rsize_t sz) {
+    vm_size_t out = 0;
+    return vm_read_overwrite(task, addr, sz, (vm_address_t)(uintptr_t)buf, &out);
 }
 
-static int twrite_raw(task_t task, mach_vm_address_t addr, const void *buf, mach_vm_size_t sz) {
-    kern_return_t kr = mach_vm_write(task, addr, (vm_offset_t)(uintptr_t)buf, (mach_msg_type_number_t)sz);
+static int twrite_raw(task_t task, raddr_t addr, const void *buf, rsize_t sz) {
+    kern_return_t kr = vm_write(task, addr, (vm_offset_t)(uintptr_t)buf, (mach_msg_type_number_t)sz);
     return kr == KERN_SUCCESS ? 0 : -1;
 }
 
-static int twrite_code(task_t task, mach_vm_address_t addr, const void *buf, mach_vm_size_t sz) {
-    mach_vm_address_t page = addr & ~PAGE_MASK;
-    mach_vm_size_t span = ((addr - page) + sz + PAGE_MASK) & ~PAGE_MASK;
-    kern_return_t kr = mach_vm_protect(task, page, span, FALSE,
-                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+static int twrite_code(task_t task, raddr_t addr, const void *buf, rsize_t sz) {
+    raddr_t page = addr & ~PAGE_MASK;
+    rsize_t span = ((addr - page) + sz + PAGE_MASK) & ~PAGE_MASK;
+    kern_return_t kr = vm_protect(task, page, span, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS)
-        kr = mach_vm_protect(task, page, span, FALSE,
-                             VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        kr = vm_protect(task, page, span, FALSE,
+                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
     if (kr != KERN_SUCCESS) return -1;
     if (twrite_raw(task, addr, buf, sz) != 0) return -2;
-    mach_vm_protect(task, page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    vm_protect(task, page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     return 0;
 }
 
 typedef struct {
-    mach_vm_address_t load;
+    raddr_t load;
     char path[512];
 } remote_img_t;
 
-static int load_images(task_t task, mach_vm_address_t all_info_addr,
+static int load_images(task_t task, raddr_t all_info_addr,
                        remote_img_t **out_imgs, uint32_t *out_n) {
     struct dyld_all_image_infos infos;
     if (tread(task, all_info_addr, &infos, sizeof(infos)) != KERN_SUCCESS) return -1;
@@ -70,7 +75,7 @@ static int load_images(task_t task, mach_vm_address_t all_info_addr,
     size_t arr_sz = sizeof(struct dyld_image_info) * infos.infoArrayCount;
     struct dyld_image_info *arr = (struct dyld_image_info *)malloc(arr_sz);
     if (!arr) return -1;
-    if (tread(task, (mach_vm_address_t)(uintptr_t)infos.infoArray, arr, arr_sz) != KERN_SUCCESS) {
+    if (tread(task, (raddr_t)(uintptr_t)infos.infoArray, arr, arr_sz) != KERN_SUCCESS) {
         free(arr);
         return -1;
     }
@@ -81,9 +86,9 @@ static int load_images(task_t task, mach_vm_address_t all_info_addr,
     uint32_t n = 0;
     for (uint32_t i = 0; i < infos.infoArrayCount; i++) {
         if (!arr[i].imageLoadAddress) continue;
-        imgs[n].load = (mach_vm_address_t)(uintptr_t)arr[i].imageLoadAddress;
+        imgs[n].load = (raddr_t)(uintptr_t)arr[i].imageLoadAddress;
         if (arr[i].imageFilePath) {
-            tread(task, (mach_vm_address_t)(uintptr_t)arr[i].imageFilePath,
+            tread(task, (raddr_t)(uintptr_t)arr[i].imageFilePath,
                   imgs[n].path, sizeof(imgs[n].path) - 1);
         }
         n++;
@@ -94,15 +99,15 @@ static int load_images(task_t task, mach_vm_address_t all_info_addr,
     return 0;
 }
 
-static mach_vm_address_t remote_sym(task_t task, mach_vm_address_t image, const char *want) {
+static raddr_t remote_sym(task_t task, raddr_t image, const char *want) {
     struct mach_header_64 mh;
     if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) return 0;
     if (mh.magic != MH_MAGIC_64) return 0;
 
-    mach_vm_address_t lc = image + sizeof(mh);
+    raddr_t lc = image + sizeof(mh);
     struct segment_command_64 linkedit = {0};
     struct symtab_command symtab = {0};
-    mach_vm_address_t slide = 0;
+    raddr_t slide = 0;
     int have_slide = 0;
 
     for (uint32_t i = 0; i < mh.ncmds; i++) {
@@ -126,7 +131,7 @@ static mach_vm_address_t remote_sym(task_t task, mach_vm_address_t image, const 
     }
     if (!symtab.cmd || !linkedit.cmd) return 0;
 
-    mach_vm_address_t base = linkedit.vmaddr + slide - linkedit.fileoff;
+    raddr_t base = linkedit.vmaddr + slide - linkedit.fileoff;
     char *strtbl = (char *)malloc(symtab.strsize);
     if (!strtbl) return 0;
     if (tread(task, base + symtab.stroff, strtbl, symtab.strsize) != KERN_SUCCESS) {
@@ -137,7 +142,7 @@ static mach_vm_address_t remote_sym(task_t task, mach_vm_address_t image, const 
     char want2[256];
     snprintf(want2, sizeof(want2), "_%s", want);
 
-    mach_vm_address_t hit = 0;
+    raddr_t hit = 0;
     for (uint32_t s = 0; s < symtab.nsyms; s++) {
         struct nlist_64 e;
         if (tread(task, base + symtab.symoff + sizeof(e) * s, &e, sizeof(e)) != KERN_SUCCESS)
@@ -154,29 +159,28 @@ static mach_vm_address_t remote_sym(task_t task, mach_vm_address_t image, const 
     return hit;
 }
 
-/* 扫描镜像可写段，把指向 targets 的指针改成 stub */
+/* Scan writable segments; retarget pointers that equal targets[] to stub. */
 static int rewrite_gots(task_t task, remote_img_t *imgs, uint32_t nimg,
-                        mach_vm_address_t tersafe_base,
-                        const mach_vm_address_t *targets, int nt,
-                        mach_vm_address_t stub) {
+                        raddr_t tersafe_base,
+                        const raddr_t *targets, int nt,
+                        raddr_t stub) {
     int hits = 0;
     uint8_t *chunk = (uint8_t *)malloc(0x10000);
     if (!chunk) return 0;
 
     for (uint32_t ii = 0; ii < nimg; ii++) {
-        mach_vm_address_t image = imgs[ii].load;
-        if (!image || image == tersafe_base) continue; /* 不改 tersafe 内部指针 */
+        raddr_t image = imgs[ii].load;
+        if (!image || image == tersafe_base) continue;
 
         struct mach_header_64 mh;
         if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) continue;
         if (mh.magic != MH_MAGIC_64) continue;
 
-        mach_vm_address_t lc = image + sizeof(mh);
-        mach_vm_address_t slide = 0;
+        raddr_t lc = image + sizeof(mh);
+        raddr_t slide = 0;
         int have_slide = 0;
 
-        /* 先拿 slide */
-        mach_vm_address_t lc0 = lc;
+        raddr_t lc0 = lc;
         for (uint32_t i = 0; i < mh.ncmds; i++) {
             struct load_command cmd;
             if (tread(task, lc0, &cmd, sizeof(cmd)) != KERN_SUCCESS) break;
@@ -207,27 +211,26 @@ static int rewrite_gots(task_t task, remote_img_t *imgs, uint32_t nimg,
                 if (!writable && !is_data) { lc += cmd.cmdsize; continue; }
                 if (seg.vmsize == 0 || seg.vmsize > 64 * 1024 * 1024) { lc += cmd.cmdsize; continue; }
 
-                mach_vm_address_t seg_addr = seg.vmaddr + slide;
-                mach_vm_size_t off = 0;
+                raddr_t seg_addr = seg.vmaddr + slide;
+                rsize_t off = 0;
                 while (off + 8 <= seg.vmsize) {
-                    mach_vm_size_t nread = seg.vmsize - off;
+                    rsize_t nread = seg.vmsize - off;
                     if (nread > 0x10000) nread = 0x10000;
-                    nread &= ~(mach_vm_size_t)7;
+                    nread &= ~(rsize_t)7;
                     if (nread < 8) break;
                     if (tread(task, seg_addr + off, chunk, nread) != KERN_SUCCESS) {
                         off += nread;
                         continue;
                     }
-                    for (mach_vm_size_t p = 0; p + 8 <= nread; p += 8) {
+                    for (rsize_t p = 0; p + 8 <= nread; p += 8) {
                         uint64_t v;
                         memcpy(&v, chunk + p, 8);
                         for (int t = 0; t < nt; t++) {
                             if (!targets[t] || v != (uint64_t)targets[t]) continue;
-                            mach_vm_address_t at = seg_addr + off + p;
-                            /* DATA_CONST 可能需先改保护 */
-                            mach_vm_address_t page = at & ~PAGE_MASK;
-                            mach_vm_protect(task, page, 0x4000, FALSE,
-                                            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                            raddr_t at = seg_addr + off + p;
+                            raddr_t page = at & ~PAGE_MASK;
+                            vm_protect(task, page, 0x4000, FALSE,
+                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
                             uint64_t nv = (uint64_t)stub;
                             if (twrite_raw(task, at, &nv, 8) == 0) hits++;
                         }
@@ -242,7 +245,7 @@ static int rewrite_gots(task_t task, remote_img_t *imgs, uint32_t nimg,
     return hits;
 }
 
-static int patch_ret0(task_t task, mach_vm_address_t addr) {
+static int patch_ret0(task_t task, raddr_t addr) {
     uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u }; /* MOV X0,#0 ; RET */
     return twrite_code(task, addr, code, sizeof(code));
 }
@@ -276,13 +279,13 @@ int main(int argc, char **argv) {
 
     remote_img_t *imgs = NULL;
     uint32_t nimg = 0;
-    mach_vm_address_t tersafe = 0;
+    raddr_t tersafe = 0;
 
     for (int t = 0; t < 40; t++) {
         free(imgs);
         imgs = NULL;
         nimg = 0;
-        if (load_images(task, dyld.all_image_info_addr, &imgs, &nimg) != 0) {
+        if (load_images(task, (raddr_t)dyld.all_image_info_addr, &imgs, &nimg) != 0) {
             sleep(1);
             continue;
         }
@@ -312,11 +315,11 @@ int main(int argc, char **argv) {
         NULL
     };
 
-    mach_vm_address_t addrs[16];
+    raddr_t addrs[16];
     int naddr = 0;
     memset(addrs, 0, sizeof(addrs));
     for (int i = 0; syms[i] && naddr < 16; i++) {
-        mach_vm_address_t a = remote_sym(task, tersafe, syms[i]);
+        raddr_t a = remote_sym(task, tersafe, syms[i]);
         if (!a) {
             fprintf(stdout, "miss %s\n", syms[i]);
             continue;
@@ -331,9 +334,8 @@ int main(int argc, char **argv) {
         return 5;
     }
 
-    /* 匿名可执行桩 */
-    mach_vm_address_t stub = 0;
-    kr = mach_vm_allocate(task, &stub, 0x4000, VM_FLAGS_ANYWHERE);
+    raddr_t stub = 0;
+    kr = vm_allocate(task, &stub, 0x4000, VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS || !stub) {
         write_status("FAIL alloc_stub");
         free(imgs);
