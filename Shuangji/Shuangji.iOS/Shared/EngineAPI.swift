@@ -63,6 +63,18 @@ public enum EngineAPI {
         ], completion: completion)
     }
 
+    private struct StatusEnvelope: Decodable {
+        let data: Status?
+        let Mode: Int?
+        let PoolCount: Int?
+        let ReadyText: String?
+        let GreenFrozen: Bool?
+        let ReadyModify: Bool?
+        let ReadyLobby: Bool?
+        let ModifyCount: Int?
+        let BoostInterceptCount: Int?
+    }
+
     public static func status(cfg: AppConfig, completion: @escaping (Result<Status, Error>) -> Void) {
         guard var url = cfg.engineBaseURL else {
             completion(.failure(APIError.badURL)); return
@@ -83,6 +95,24 @@ public enum EngineAPI {
             }
             guard let data = data else {
                 completion(.failure(APIError.empty)); return
+            }
+            // 引擎返回 { ok, data: AccountStatusDto }；兼容扁平字段
+            if let env = try? JSONDecoder().decode(StatusEnvelope.self, from: data) {
+                if let nested = env.data {
+                    completion(.success(nested))
+                    return
+                }
+                completion(.success(Status(
+                    Mode: env.Mode,
+                    PoolCount: env.PoolCount,
+                    ReadyText: env.ReadyText,
+                    ModifyCount: env.ModifyCount,
+                    BoostInterceptCount: env.BoostInterceptCount,
+                    GreenFrozen: env.GreenFrozen,
+                    ReadyModify: env.ReadyModify,
+                    ReadyLobby: env.ReadyLobby
+                )))
+                return
             }
             do {
                 let s = try JSONDecoder().decode(Status.self, from: data)

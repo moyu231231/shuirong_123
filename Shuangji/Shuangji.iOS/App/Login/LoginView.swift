@@ -39,7 +39,10 @@ struct LoginView: View {
         cfg.host = HubEndpoint.host
         cfg.socksPort = HubEndpoint.socksPort
         cfg.enginePort = HubEndpoint.enginePort
-        cfg.workMode = 2
+        // 登录不强制改模式，避免冲掉「读取」收绿流程；默认保留本地标记
+        if cfg.workMode != 0 && cfg.workMode != 1 && cfg.workMode != 2 && cfg.workMode != 3 {
+            cfg.workMode = 1
+        }
         cfg.localInterceptEnabled = true
         cfg.save()
 
@@ -49,8 +52,8 @@ struct LoginView: View {
                 switch result {
                 case .success(let r):
                     AuthSession.markLoggedIn(user: cfg.userName, token: r.token ?? "ok")
-                    // 静默把引擎切到「修改」——云端拦 4013
-                    EngineAPI.setMode(cfg: cfg, mode: 2) { _ in
+                    // 同步引擎为当前模式（含读取），不强制修改
+                    EngineAPI.setMode(cfg: cfg, mode: cfg.workMode) { _ in
                         DispatchQueue.main.async {
                             busy = false
                             onSuccess()
