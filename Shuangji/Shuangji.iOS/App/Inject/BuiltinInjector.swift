@@ -96,7 +96,7 @@ enum BuiltinInjector {
 
         // Titanium：放进目标 App 的 Frameworks，路径像游戏自带库
         var stealthName = stealthNames.first { !rootExists(sy, fwk.appendingPathComponent($0).path) }
-            ?? "libSparseRecovery_\(Int(Date().timeIntervalSince1970 % 10000)).dylib"
+            ?? "libSparseRecovery_\(Int(Date().timeIntervalSince1970) % 10000).dylib"
         let dest = fwk.appendingPathComponent(stealthName).path
 
         var r = rootFs(sy, "mkdir", ["--path", fwk.path])
