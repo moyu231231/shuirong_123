@@ -436,7 +436,7 @@ static void chown_installd(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject mkdir|cp|rm|chown33|enc|find|deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chown33|exists|enc|find|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
@@ -483,6 +483,10 @@ int main(int argc, char **argv) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }
         chown_installd(path);
         return 0;
+    }
+    if (!strcmp(mode, "exists")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 1; }
+        return access(path, F_OK) == 0 ? 0 : 1;
     }
     /* 0=未加密可注入 1=加密 2=无法解析 */
     if (!strcmp(mode, "enc")) {

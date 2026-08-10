@@ -1,8 +1,7 @@
 import Foundation
 
-/// TrollFools 同款链路：
-/// root find(未加密) → copy dylib → ct_bypass(dylib) → insert_dylib → ldid/ct_bypass(宿主) → chown
-/// 绝不改加密 Mach-O；失败必须完整回滚，避免半注入闪退。
+/// TrollFools 同款：宿主原始备份 `.sy_bak` 常驻，移除/重注都从备份还原再动手。
+/// 旧逻辑成功后删备份 → 移除只能 optool 刮 LC → 重注叠在脏二进制上 → 二次闪退。
 enum BuiltinInjector {
 
     static let dylibFileName = "ApolloNetService.dylib"
@@ -55,35 +54,54 @@ enum BuiltinInjector {
         let fwk = app.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
         let dest = fwk.appendingPathComponent(dylibFileName)
         let team = app.teamID.isEmpty ? "0000000000" : app.teamID
-        var bak: String?
         var machoPath: String?
+        var bakPath: String?
 
-        func rollback() {
-            if let bak, let machoPath {
-                _ = rootFs(sy, "cp", ["--src", bak, "--dst", machoPath])
-                _ = rootFs(sy, "rm", ["--path", bak])
-            }
+        func cleanupInjectedFiles() {
             _ = rootFs(sy, "rm", ["--path", dest.path])
             _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent(".sy_injected").path])
             _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent("ShuiyongMem.dylib").path])
         }
 
+        func restoreFromBak() {
+            if let bakPath, let machoPath {
+                _ = rootFs(sy, "cp", ["--src", bakPath, "--dst", machoPath])
+                _ = rootFs(sy, "chown33", ["--path", machoPath])
+            }
+        }
+
         do {
-            // 0) 先用 root 找未加密目标（沙盒读头会误判，绝不能靠 FileHandle）
+            // 0) root 找未加密目标
             let found = SpawnUtil.rootRun(sy.path, args: ["find", "--app", app.bundleURL.path])
             let path = found.out.trimmingCharacters(in: .whitespacesAndNewlines)
             if found.code != 0 || path.isEmpty {
                 throw InjectError.failed(
-                    "没有可注入的未加密二进制。App Store 加密包需砸壳/解密；或 Frameworks 里需有未加密 Mach-O（与 TrollFools 相同限制）。"
+                    "没有可注入的未加密二进制。App Store 加密包需砸壳/解密；或 Frameworks 里需有未加密 Mach-O。"
                 )
             }
-            let enc = SpawnUtil.rootRun(sy.path, args: ["enc", "--path", path])
-            if enc.code != 0 {
+            if SpawnUtil.rootRun(sy.path, args: ["enc", "--path", path]).code != 0 {
                 throw InjectError.failed("目标仍加密，已拒绝注入：\(path)")
             }
             machoPath = path
+            let bak = path + ".sy_bak"
+            bakPath = bak
 
-            // 1) 目录 + 拷贝 dylib
+            // 1) 有原始备份则先还原到干净宿主；没有才新建（绝不能用已注入文件覆盖备份）
+            if rootExists(sy, bak) {
+                let r = rootFs(sy, "cp", ["--src", bak, "--dst", path])
+                if r.code != 0 {
+                    throw InjectError.failed("从备份还原失败，请重装游戏后再注：\(r.detail)")
+                }
+                _ = rootFs(sy, "chown33", ["--path", path])
+            } else {
+                let r = rootFs(sy, "cp", ["--src", path, "--dst", bak])
+                if r.code != 0 {
+                    throw InjectError.failed("创建原始备份失败：\(r.detail)")
+                }
+                _ = rootFs(sy, "chown33", ["--path", bak])
+            }
+
+            // 2) 目录 + 拷贝 dylib
             var r = rootFs(sy, "mkdir", ["--path", fwk.path])
             if r.code != 0 {
                 throw InjectError.failed("创建 Frameworks 失败：\(r.detail)")
@@ -94,20 +112,11 @@ enum BuiltinInjector {
                 throw InjectError.failed("复制 dylib 失败：\(r.detail.isEmpty ? "exit \(r.code)" : r.detail)")
             }
 
-            // 2) 先签 dylib（TrollFools：asset 先 ct_bypass）
+            // 3) 先签 dylib
             try resign(ldid: ldid.path, ctb: ctb.path, path: dest.path, team: team, keepEnt: false)
             _ = rootFs(sy, "chown33", ["--path", dest.path])
 
-            // 3) 备份宿主
-            let bakPath = path + ".sy_bak"
-            bak = bakPath
-            _ = rootFs(sy, "rm", ["--path", bakPath])
-            r = rootFs(sy, "cp", ["--src", path, "--dst", bakPath])
-            if r.code != 0 {
-                throw InjectError.failed("备份失败：\(r.detail)")
-            }
-
-            // 4) insert_dylib
+            // 4) insert_dylib（此时宿主一定是干净备份还原后的）
             let loadName = "@rpath/\(dylibFileName)"
             var args = [
                 loadName, path,
@@ -120,33 +129,33 @@ enum BuiltinInjector {
             }
             if ins.code != 0 {
                 let msg = (ins.err.isEmpty ? ins.out : ins.err).trimmingCharacters(in: .whitespacesAndNewlines)
-                if msg.localizedCaseInsensitiveContains("encrypted") {
-                    throw InjectError.failed("注入目标加密（请换砸壳包）：\(msg)")
-                }
-                throw InjectError.failed("insert_dylib 失败：\(msg)")
+                throw InjectError.failed(
+                    msg.localizedCaseInsensitiveContains("encrypted")
+                    ? "注入目标加密（请换砸壳包）：\(msg)"
+                    : "insert_dylib 失败：\(msg)"
+                )
             }
 
-            // 5) rpath
+            // 5) rpath（干净文件上只加一次）
             if let intn = toolURL("install_name_tool") {
                 _ = SpawnUtil.rootRun(intn.path, args: ["-add_rpath", "@executable_path/Frameworks", path])
                 _ = SpawnUtil.rootRun(intn.path, args: ["-add_rpath", "@loader_path/Frameworks", path])
             }
 
-            // 6) 宿主重签 + CoreTrust
+            // 6) 宿主重签
             try resign(ldid: ldid.path, ctb: ctb.path, path: path, team: team, keepEnt: true)
             _ = rootFs(sy, "chown33", ["--path", path])
 
-            // 7) 标记成功后再删备份
+            // 7) 标记 —— 保留 .sy_bak，供移除/重注还原
             let mark = fwk.appendingPathComponent(".sy_injected")
             let tmp = NSTemporaryDirectory() + "sy_mark_\(UUID().uuidString)"
             try? path.write(toFile: tmp, atomically: true, encoding: .utf8)
             _ = rootFs(sy, "cp", ["--src", tmp, "--dst", mark.path])
             try? FileManager.default.removeItem(atPath: tmp)
             _ = rootFs(sy, "chown33", ["--path", mark.path])
-            _ = rootFs(sy, "rm", ["--path", bakPath])
-            bak = nil
         } catch {
-            rollback()
+            restoreFromBak()
+            cleanupInjectedFiles()
             throw error
         }
     }
@@ -163,14 +172,27 @@ enum BuiltinInjector {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty { machoPath = t }
         }
+        // 标记丢了也尽量找备份：扫描 find 目标旁的 .sy_bak
+        if machoPath == nil {
+            let found = SpawnUtil.rootRun(sy.path, args: ["find", "--app", app.bundleURL.path])
+            let p = found.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !p.isEmpty, rootExists(sy, p + ".sy_bak") {
+                machoPath = p
+            }
+        }
 
-        // 优先从备份恢复；没有备份再用 optool 卸 LC
         if let machoPath {
             let bak = machoPath + ".sy_bak"
-            let restored = rootFs(sy, "cp", ["--src", bak, "--dst", machoPath])
-            if restored.code == 0 {
-                _ = rootFs(sy, "rm", ["--path", bak])
+            if rootExists(sy, bak) {
+                // 整文件还原到注入前，不靠 optool 刮 LC
+                let r = rootFs(sy, "cp", ["--src", bak, "--dst", machoPath])
+                if r.code != 0 {
+                    throw InjectError.failed("还原备份失败：\(r.detail)")
+                }
+                _ = rootFs(sy, "chown33", ["--path", machoPath])
+                // 备份继续留着，方便再次注入
             } else if let optool = toolURL("optool") {
+                // 老版本已删备份：尽力卸 LC（可能仍不稳定，建议重装游戏）
                 _ = SpawnUtil.rootRun(optool.path, args: [
                     "uninstall", "-p", "@rpath/\(dylibFileName)", "-t", machoPath
                 ])
@@ -185,13 +207,13 @@ enum BuiltinInjector {
         _ = rootFs(sy, "rm", ["--path", dest.path])
         _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent("ShuiyongMem.dylib").path])
         _ = rootFs(sy, "rm", ["--path", mark.path])
-        // 扫掉可能残留的 bak
-        if let machoPath {
-            _ = rootFs(sy, "rm", ["--path", machoPath + ".sy_bak"])
-        }
     }
 
     // MARK: - helpers
+
+    private static func rootExists(_ sy: URL, _ path: String) -> Bool {
+        SpawnUtil.rootRun(sy.path, args: ["exists", "--path", path]).code == 0
+    }
 
     private static func rootFs(_ sy: URL, _ mode: String, _ args: [String]) -> (code: Int32, detail: String) {
         let r = SpawnUtil.rootRun(sy.path, args: [mode] + args)
