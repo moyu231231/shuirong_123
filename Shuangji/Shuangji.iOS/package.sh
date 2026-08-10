@@ -45,6 +45,7 @@ fi
 echo "==> [3/6] 编译 App + dylib + Tunnel"
 mkdir -p "$ROOT/Resources"
 rm -rf "$DERIVED"
+set +e
 xcodebuild \
   -project Shuiyong.xcodeproj \
   -scheme Shuiyong \
@@ -55,7 +56,14 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
-  build
+  build 2>&1 | tee "$ROOT/.build-xcode.log"
+XB=${PIPESTATUS[0]}
+set -e
+if [[ "$XB" -ne 0 ]]; then
+  echo "xcodebuild 失败 (exit $XB)，关键错误："
+  grep -E "error:|fatal error:|BUILD FAILED" "$ROOT/.build-xcode.log" | tail -n 80 || true
+  exit "$XB"
+fi
 
 APP_PATH="$(find "$DERIVED/Build/Products" -name '*.app' -maxdepth 3 | head -n1)"
 if [[ -z "$APP_PATH" ]]; then

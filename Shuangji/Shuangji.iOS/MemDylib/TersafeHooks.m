@@ -1,7 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
-#import <mach/vm_param.h>
 #import <mach-o/dyld.h>
 #import <sys/mman.h>
 #import <unistd.h>
@@ -10,29 +9,25 @@
 #import "fishhook.h"
 
 /*
- * IDA (tersafe.i64) 结论 —— 只动上报/收检测，不动 encrypt/ioctl 全家桶：
- *
- * 举报 / 异常上报（出站）:
- *   sub_37820 循环: tss_get_report_data() → sub_37060(vtable+64 发 GS) → tss_del_report_data
- *   另有 tss_get_report_data3/4 → ioctl(37/59)
- *   导出: _tss_get_report_data* / _TssSDKGetReportData*
- *   内部直调 BL，fishhook 钩不住 → 必须改导出入口机器码
- *
- * 检测下发（入站）:
- *   CS: sub_37130 → tss_sdk_rcv_anti_data
- *   游戏: TssSDKOnRecvData → tss_sdk_rcv_anti_data
- *
- * 已确认空壳: tss_sdk_ischeatpacket 直接 return 0，不用钩
- * 禁用: 线程挂起 / 乱钩 dyld / 钩 encryptpacket（会闪）
+ * IDA (tersafe.i64):
+ * - outbound report: get_report_data* -> sub_37060 (GS)
+ * - inbound detect: TssSDKOnRecvData / tss_sdk_rcv_anti_data
+ * Internal BL cannot be fishhook'd -> patch export prologues.
+ * Do NOT hook encryptpacket / global ioctl / suspend threads.
  */
 
 #pragma mark - aarch64 stub patch
 
+/* PAGE_SIZE is unavailable / non-constant on newer Apple SDKs */
+static size_t sy_page_size(void) {
+    return (size_t)getpagesize();
+}
+
 static int sy_make_rwx(void *addr, size_t len) {
-    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(PAGE_SIZE - 1);
+    size_t psz = sy_page_size();
+    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(psz - 1);
     size_t off = (uintptr_t)addr - page;
-    size_t span = off + len;
-    span = (span + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    size_t span = (off + len + psz - 1) & ~(psz - 1);
     kern_return_t kr = vm_protect(mach_task_self(), page, span,
                                   FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
@@ -42,10 +37,10 @@ static int sy_make_rwx(void *addr, size_t len) {
 }
 
 static int sy_make_rx(void *addr, size_t len) {
-    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(PAGE_SIZE - 1);
+    size_t psz = sy_page_size();
+    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(psz - 1);
     size_t off = (uintptr_t)addr - page;
-    size_t span = off + len;
-    span = (span + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    size_t span = (off + len + psz - 1) & ~(psz - 1);
     vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     return 0;
 }
@@ -102,16 +97,18 @@ static void *(*orig_tss_get_report_data)(void);
 static void *hook_TssSDKGetReportData(void) { return NULL; }
 static void *hook_tss_get_report_data(void) { return NULL; }
 
+static void *orig_unused[6];
+
 static void sy_fishhook_report_imports(void) {
     struct rebinding rb[] = {
         { "TssSDKGetReportData",  (void *)hook_TssSDKGetReportData,  (void **)&orig_TssSDKGetReportData },
-        { "TssSDKGetReportData2", (void *)hook_TssSDKGetReportData,  NULL },
-        { "TssSDKGetReportData3", (void *)hook_TssSDKGetReportData,  NULL },
-        { "TssSDKGetReportData4", (void *)hook_TssSDKGetReportData,  NULL },
+        { "TssSDKGetReportData2", (void *)hook_TssSDKGetReportData,  &orig_unused[0] },
+        { "TssSDKGetReportData3", (void *)hook_TssSDKGetReportData,  &orig_unused[1] },
+        { "TssSDKGetReportData4", (void *)hook_TssSDKGetReportData,  &orig_unused[2] },
         { "tss_get_report_data",  (void *)hook_tss_get_report_data,  (void **)&orig_tss_get_report_data },
-        { "tss_get_report_data2", (void *)hook_tss_get_report_data,  NULL },
-        { "tss_get_report_data3", (void *)hook_tss_get_report_data,  NULL },
-        { "tss_get_report_data4", (void *)hook_tss_get_report_data,  NULL },
+        { "tss_get_report_data2", (void *)hook_tss_get_report_data,  &orig_unused[3] },
+        { "tss_get_report_data3", (void *)hook_tss_get_report_data,  &orig_unused[4] },
+        { "tss_get_report_data4", (void *)hook_tss_get_report_data,  &orig_unused[5] },
     };
     rebind_symbols(rb, sizeof(rb) / sizeof(rb[0]));
 }

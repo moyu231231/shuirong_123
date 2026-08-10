@@ -213,70 +213,120 @@ enum BuiltinInjector {
     }
 
     private static func locateInjectTarget(in bundle: URL) -> URL? {
+        let fm = FileManager.default
         let fwkRoot = bundle.appendingPathComponent("Frameworks", isDirectory: true)
         var preferred: [(URL, Int)] = []
         var others: [(URL, Int)] = []
+        var anyMachO: [(URL, Int)] = []
 
-        if let list = try? FileManager.default.contentsOfDirectory(atPath: fwkRoot.path) {
+        // 1) Frameworks（跳过 ACE/tersafe）—— 游戏优先 Unity/GCloud
+        if let list = try? fm.contentsOfDirectory(atPath: fwkRoot.path) {
             for item in list where item.hasSuffix(".framework") {
                 if blockedFrameworks.contains(where: { item.localizedCaseInsensitiveContains($0) }) {
                     continue
                 }
                 let name = (item as NSString).deletingPathExtension
                 let macho = fwkRoot.appendingPathComponent("\(item)/\(name)")
-                guard FileManager.default.fileExists(atPath: macho.path),
-                      !isEncryptedMachO(macho) else { continue }
-                let size = (try? FileManager.default.attributesOfItem(atPath: macho.path)[.size] as? Int) ?? 0
+                guard fm.fileExists(atPath: macho.path) else { continue }
+                let size = (try? fm.attributesOfItem(atPath: macho.path)[.size] as? Int) ?? 0
+                anyMachO.append((macho, size))
+                if isEncryptedMachO(macho) { continue }
                 let hot = name.contains("Unity") || name.contains("Il2Cpp")
                     || name.contains("GCloud") || name.contains("Apollo")
-                    || name.contains("GameAssembly")
+                    || name.contains("GameAssembly") || name.contains("UnityFramework")
                 if hot { preferred.append((macho, size)) }
                 else { others.append((macho, size)) }
             }
         }
 
-        // 优先大体积游戏框架（TrollFools 也是选可用 framework，而不是主程序）
         if let best = preferred.max(by: { $0.1 < $1.1 })?.0 { return best }
         if let best = others.max(by: { $0.1 < $1.1 })?.0 { return best }
 
-        // 最后才主程序
-        if let exe = locateExecutable(in: bundle), !isEncryptedMachO(exe) {
-            return exe
+        // 2) 主程序（普通 App / 无 Framework 时）
+        if let exe = locateExecutable(in: bundle), fm.fileExists(atPath: exe.path) {
+            anyMachO.append((exe, (try? fm.attributesOfItem(atPath: exe.path)[.size] as? Int) ?? 0))
+            if !isEncryptedMachO(exe) { return exe }
         }
-        return nil
+
+        // 3) 读头失败/误判加密时：仍回退到最大的现存 Mach-O，交给 insert_dylib
+        if let best = anyMachO.max(by: { $0.1 < $1.1 })?.0 { return best }
+        return locateExecutable(in: bundle)
     }
 
+    /// 仅在明确 cryptid!=0 时视为加密。fat / 读失败 / 未知 magic → 不拦截（旧逻辑把 fat 全判加密，导致任意 App 都「没有可注入二进制」）。
     private static func isEncryptedMachO(_ url: URL) -> Bool {
-        guard let fh = FileHandle(forReadingAtPath: url.path) else { return true }
+        guard let fh = FileHandle(forReadingAtPath: url.path) else { return false }
         defer { try? fh.close() }
-        let data = fh.readData(ofLength: min(1_048_576, Int(fh.seekToEndOfFile())))
-        fh.seek(toFileOffset: 0)
-        guard data.count > 32 else { return true }
-        // 粗扫 LC_ENCRYPTION_INFO cryptid != 0
-        let bytes = [UInt8](data)
-        var magic: UInt32 = 0
-        _ = withUnsafeMutableBytes(of: &magic) { dest in
-            data.copyBytes(to: dest, from: 0..<4)
+        // 只读头部；fat 再按 slice offset 补读
+        let head = fh.readData(ofLength: 4096)
+        guard head.count >= 32 else { return false }
+        let magic = readU32(head, 0, bigEndian: false)
+        // Fat（头字段为大端）：检查 arm64 slice 是否全加密
+        if magic == 0xCAFEBABE || magic == 0xBEBAFECA {
+            let nfat = Int(readU32(head, 4, bigEndian: true))
+            guard nfat > 0, nfat < 32 else { return false }
+            var sawArm64 = false
+            var allEnc = true
+            for i in 0..<nfat {
+                let base = 8 + i * 20
+                guard base + 20 <= head.count else { break }
+                let cputype = Int32(bitPattern: readU32(head, base, bigEndian: true))
+                let offset = UInt64(readU32(head, base + 8, bigEndian: true))
+                // CPU_TYPE_ARM64 = 0x0100000C
+                guard cputype == 0x0100000C else { continue }
+                sawArm64 = true
+                fh.seek(toFileOffset: offset)
+                let slice = fh.readData(ofLength: 65536)
+                if !thinSliceEncrypted(slice, offset: 0) {
+                    allEnc = false
+                }
+            }
+            return sawArm64 ? allEnc : false
         }
-        guard magic == 0xFEEDFACF else { return true } // 只要 thin arm64；fat 交给 insert_dylib
-        var off = 32
-        let ncmds = Int(bytes[16]) | (Int(bytes[17]) << 8) | (Int(bytes[18]) << 16) | (Int(bytes[19]) << 24)
-        // sizeofcmds at 20
+        // Thin 64-bit：补读到足够扫 load commands
+        fh.seek(toFileOffset: 0)
+        let thin = fh.readData(ofLength: 1_048_576)
+        if magic == 0xFEEDFACF || magic == 0xCFFAEDFE {
+            return thinSliceEncrypted(thin, offset: 0)
+        }
+        // 未知格式：不拦，交给 insert_dylib
+        return false
+    }
+
+    private static func thinSliceEncrypted(_ data: Data, offset: Int) -> Bool {
+        guard offset + 32 <= data.count else { return false }
+        let magic = readU32(data, offset, bigEndian: false)
+        let swap = magic == 0xCFFAEDFE
+        guard magic == 0xFEEDFACF || magic == 0xCFFAEDFE else { return false }
+        let ncmds = Int(readU32(data, offset + 16, bigEndian: swap))
+        var off = offset + 32
         for _ in 0..<ncmds {
-            if off + 8 > bytes.count { break }
-            let cmd = Int(bytes[off]) | (Int(bytes[off+1]) << 8) | (Int(bytes[off+2]) << 16) | (Int(bytes[off+3]) << 24)
-            let cmdsize = Int(bytes[off+4]) | (Int(bytes[off+5]) << 8) | (Int(bytes[off+6]) << 16) | (Int(bytes[off+7]) << 24)
+            guard off + 8 <= data.count else { break }
+            let cmd = Int(readU32(data, off, bigEndian: swap))
+            let cmdsize = Int(readU32(data, off + 4, bigEndian: swap))
             if cmdsize < 8 { break }
-            if cmd == 0x21 || cmd == 0x2C { // LC_ENCRYPTION_INFO / _64
-                if off + 16 <= bytes.count {
-                    let cryptid = Int(bytes[off+12]) | (Int(bytes[off+13]) << 8)
-                        | (Int(bytes[off+14]) << 16) | (Int(bytes[off+15]) << 24)
+            // LC_ENCRYPTION_INFO = 0x21, LC_ENCRYPTION_INFO_64 = 0x2C
+            if cmd == 0x21 || cmd == 0x2C {
+                if off + 16 <= data.count {
+                    let cryptid = Int(readU32(data, off + 12, bigEndian: swap))
                     if cryptid != 0 { return true }
                 }
             }
             off += cmdsize
         }
         return false
+    }
+
+    private static func readU32(_ data: Data, _ offset: Int, bigEndian: Bool) -> UInt32 {
+        guard offset + 4 <= data.count else { return 0 }
+        let b0 = UInt32(data[offset])
+        let b1 = UInt32(data[offset + 1])
+        let b2 = UInt32(data[offset + 2])
+        let b3 = UInt32(data[offset + 3])
+        if bigEndian {
+            return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        }
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
     private static func toolURL(_ name: String) -> URL? {
