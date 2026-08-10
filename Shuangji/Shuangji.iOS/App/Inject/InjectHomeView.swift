@@ -26,7 +26,7 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Text("默认动态注入：不改游戏文件，进游戏后再挂库（防启动扫盘拉闸）")
+                Text("隐蔽动态注入（opainject+Titanium）：伪装进 Frameworks → 延时挂载 → 删磁盘文件")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -155,7 +155,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "动态注入完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "动态注入成功"
-                    alertMsg = "未改游戏磁盘。\npid=\(BuiltinInjector.lastRuntimePID)\n约数秒后应出悬浮窗。\n退游戏后需重新动态注入。\n上报仍建议开链路 4013。"
+                    alertMsg = "隐蔽动态注入完成\n\(BuiltinInjector.lastTargetPath)\n\n已伪装路径+注入后删文件，无 LC。\n退游戏需重注。\n上报请开链路 4013。"
                     showAlert = true
                     reload()
                 }

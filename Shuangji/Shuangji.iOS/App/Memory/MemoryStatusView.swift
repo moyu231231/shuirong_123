@@ -12,10 +12,11 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("注入方式") {
-                    Text("请用「动态注入」：不改游戏磁盘，进程起来后再 opainject。磁盘 insert 会被启动扫盘拉闸。")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
+                Section("隐蔽注入模板") {
+                    row("引擎", "opa334/opainject ROP")
+                    row("落点", "Titanium：进 App/Frameworks")
+                    row("善后", "注入后删磁盘文件")
+                    row("延时", "35s+随机抖动")
                 }
                 Section("钩子") {
                     row("方式", "fishhook（不改机器码）")
@@ -59,7 +60,7 @@ struct MemoryStatusView: View {
             }
             DispatchQueue.main.async {
                 if body.isEmpty {
-                    statusText = "无状态文件\n请动态注入并进游戏后再查"
+                    statusText = "无状态\n请动态注入后再查"
                 } else if body.hasPrefix("OK") {
                     statusText = "✅ \(body)"
                 } else if body.hasPrefix("WAIT") {

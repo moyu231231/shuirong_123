@@ -46,6 +46,18 @@
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
 
+	<!-- 动态注入（对齐 opa334/opainject） -->
+	<key>get-task-allow</key>
+	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>com.apple.system-task-ports.control</key>
+	<true/>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
+
 	<key>keychain-access-groups</key>
 	<array>
 		<string>com.shuiyong.ports</string>

@@ -58,8 +58,23 @@ enum BuiltinInjector {
         UserDefaults.standard.set(Array(s), forKey: runtimeMarkKey)
     }
 
-    /// 动态注入：游戏干净启动 → 等进程 → opainject dlopen（不写 LC_LOAD）
-    static func runtimeInject(into app: AppEntry, settleSeconds: Int = 28) throws {
+    /*
+     隐蔽动态注入模板（综合）：
+       - opa334/opainject：ROP dlopen，不改 Mach-O LC
+       - Titanium：dylib 放进目标 .app/Frameworks（像系统库），注入后删磁盘文件
+       - TrollTitan：等进程就绪再注；不落 .sy_injected 标记
+     */
+    /// 伪装文件名：不占游戏已有库，看起来像系统/私有支持库
+    private static let stealthNames = [
+        "libSparseRecovery.dylib",
+        "libCoreRepairCore.dylib",
+        "libMobileGestaltExtensions.dylib",
+        "libsystem_darwinfoundation.dylib",
+        "libquic_migration.dylib"
+    ]
+
+    /// 动态注入：游戏干净启动 → 等进程 → opainject（不写 LC_LOAD）
+    static func runtimeInject(into app: AppEntry, settleSeconds: Int = 35) throws {
         guard let src = bundledDylibURL else { throw InjectError.noDylib }
         guard let ldid = toolURL("ldid") else { throw InjectError.noTool("ldid") }
         guard let ctb = toolURL("ct_bypass") else { throw InjectError.noTool("ct_bypass") }
@@ -72,43 +87,44 @@ enum BuiltinInjector {
             throw InjectError.failed("缺少 libcrypto.3.dylib")
         }
 
-        // 若以前磁盘注入过，先还原，避免启动就被扫到 LC
         if isInjected(bundleURL: app.bundleURL) {
             try eject(from: app)
         }
 
         let team = app.teamID.isEmpty ? "0000000000" : app.teamID
-        let destDir = runtimeCacheDir
-        let dest = "\(destDir)/\(dylibFileName)"
+        let fwk = app.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
 
-        var r = rootFs(sy, "mkdir", ["--path", destDir])
+        // Titanium：放进目标 App 的 Frameworks，路径像游戏自带库
+        var stealthName = stealthNames.first { !rootExists(sy, fwk.appendingPathComponent($0).path) }
+            ?? "libSparseRecovery_\(Int(Date().timeIntervalSince1970 % 10000)).dylib"
+        let dest = fwk.appendingPathComponent(stealthName).path
+
+        var r = rootFs(sy, "mkdir", ["--path", fwk.path])
         if r.code != 0 {
-            throw InjectError.failed("创建缓存目录失败：\(r.detail)")
+            throw InjectError.failed("创建 Frameworks 失败：\(r.detail)")
         }
         _ = rootFs(sy, "rm", ["--path", dest])
         r = rootFs(sy, "cp", ["--src", src.path, "--dst", dest])
         if r.code != 0, !copyWithBundledCp(src: src.path, dst: dest) {
-            throw InjectError.failed("复制 dylib 失败：\(r.detail)")
+            throw InjectError.failed("复制伪装 dylib 失败：\(r.detail)")
         }
         if let intn = toolURL("install_name_tool") {
-            _ = SpawnUtil.rootRun(intn.path, args: ["-id", "@rpath/\(dylibFileName)", dest])
+            _ = SpawnUtil.rootRun(intn.path, args: ["-id", "@rpath/\(stealthName)", dest])
         }
         try resign(ldid: ldid.path, ctb: ctb.path, path: dest, team: team, keepEnt: false)
         _ = rootFs(sy, "chown33", ["--path", dest])
 
-        // 干净启动游戏
         terminate(app: app)
-        Thread.sleep(forTimeInterval: 0.6)
+        Thread.sleep(forTimeInterval: 0.8)
         if !SYOpenApplicationWithBundleID(app.bundleID) {
             throw InjectError.failed("无法打开游戏，请手动打开后再点动态注入")
         }
 
-        // 等进程出现
         let needles: [String] = {
             var a: [String] = []
             let p = app.bundleURL.path
             if !p.isEmpty { a.append(p) }
-            a.append(app.bundleURL.lastPathComponent) // Xxx.app
+            a.append(app.bundleURL.lastPathComponent)
             if let exe = locateExecutable(in: app.bundleURL) {
                 a.append(exe.lastPathComponent)
             }
@@ -116,7 +132,7 @@ enum BuiltinInjector {
         }()
 
         var pid = 0
-        for _ in 0..<90 {
+        for _ in 0..<100 {
             Thread.sleep(forTimeInterval: 1)
             for n in needles {
                 let pr = SpawnUtil.rootRun(sy.path, args: ["pid", "--contains", n])
@@ -129,21 +145,43 @@ enum BuiltinInjector {
             if pid > 1 { break }
         }
         if pid <= 1 {
+            _ = rootFs(sy, "rm", ["--path", dest])
             throw InjectError.failed("未找到游戏进程。请先手动打开游戏，再点「动态注入」。")
         }
 
-        // 等 ACE 初始扫盘（磁盘无 LC）过完再挂
-        let wait = max(5, settleSeconds)
+        // 随机抖动，避开固定节奏检测
+        let jitter = Int.random(in: 0...12)
+        let wait = max(8, settleSeconds + jitter)
         Thread.sleep(forTimeInterval: TimeInterval(wait))
+
+        // 注入前再确认进程仍在
+        var still = false
+        for n in needles {
+            let pr = SpawnUtil.rootRun(sy.path, args: ["pid", "--contains", n])
+            if pr.code == 0,
+               let v = Int(pr.out.trimmingCharacters(in: .whitespacesAndNewlines)), v == pid {
+                still = true
+                break
+            }
+        }
+        if !still {
+            _ = rootFs(sy, "rm", ["--path", dest])
+            throw InjectError.failed("等待期间游戏已退出，请重试")
+        }
 
         let inj = SpawnUtil.rootRun(opa.path, args: ["\(pid)", dest])
         if inj.code != 0 {
             let msg = (inj.err.isEmpty ? inj.out : inj.err).trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = rootFs(sy, "rm", ["--path", dest])
             throw InjectError.failed("opainject 失败(pid=\(pid))：\(msg.isEmpty ? "exit \(inj.code)" : msg)")
         }
 
+        // dlopen 后删掉磁盘文件，降低文件枚举命中（映射仍在内存）
+        Thread.sleep(forTimeInterval: 0.5)
+        _ = rootFs(sy, "rm", ["--path", dest])
+
         lastRuntimePID = pid
-        lastTargetPath = "runtime pid=\(pid) \(dest)"
+        lastTargetPath = "stealth pid=\(pid) name=\(stealthName)"
         setRuntimeMarked(app.bundleID, on: true)
     }
 

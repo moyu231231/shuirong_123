@@ -212,7 +212,15 @@ for d in "$APP_PATH"/libcrypto*.dylib "$APP_PATH"/libssl*.dylib; do
 done
 [[ -f "$APP_PATH/sy_ports.dylib" ]] && ldid -S "$APP_PATH/sy_ports.dylib" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
-[[ -f "$APP_PATH/opainject" ]] && ldid -S "$APP_PATH/opainject" || true
+# opainject 必须带 task_for_pid 权限（opa334 模板）
+OPA_ENT="$ROOT/entitlements/opainject.entitlements"
+if [[ -f "$APP_PATH/opainject" ]]; then
+  if [[ -f "$OPA_ENT" ]]; then
+    ldid -S"$OPA_ENT" "$APP_PATH/opainject" || ldid -S "$APP_PATH/opainject" || true
+  else
+    ldid -S "$APP_PATH/opainject" || true
+  fi
+fi
 # 扩展
 EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"
 if [[ -n "$EXT" ]]; then
