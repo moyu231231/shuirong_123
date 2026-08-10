@@ -6,27 +6,15 @@ struct LoginView: View {
     @State private var cfg = AppConfig.load()
     @State private var busy = false
     @State private var errorText = ""
-    @State private var hubOK: Bool?
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("账号中枢"), footer: Text("使用中枢开好的用户名/密码登录后才能使用本软件。")) {
-                    TextField("中枢地址", text: $cfg.accountHost)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    TextField("端口", value: $cfg.accountPort, format: .number)
-                        .keyboardType(.numberPad)
+                Section(header: Text("登录"), footer: Text("使用已开通的用户名和密码登录。")) {
                     TextField("用户名", text: $cfg.userName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     SecureField("密码", text: $cfg.password)
-                    if let hubOK {
-                        Text(hubOK ? "中枢可达" : "中枢不可达")
-                            .font(.caption)
-                            .foregroundColor(hubOK ? .green : .red)
-                    }
                 }
                 if !errorText.isEmpty {
                     Section {
@@ -38,23 +26,19 @@ struct LoginView: View {
                         .disabled(busy || cfg.userName.isEmpty || cfg.password.isEmpty)
                 }
             }
-            .navigationTitle("水溶C 登录")
-            .onAppear { ping() }
+            .navigationTitle("水溶C")
         }
         .navigationViewStyle(StackNavigationViewStyle())
-    }
-
-    private func ping() {
-        AccountHubAPI.ping(host: cfg.accountHost, port: cfg.accountPort) { ok in
-            DispatchQueue.main.async { hubOK = ok }
-        }
     }
 
     private func login() {
         busy = true
         errorText = ""
+        // 强制使用内置中枢，不读/不展示用户可改地址
+        cfg.accountHost = HubEndpoint.host
+        cfg.accountPort = HubEndpoint.port
         cfg.save()
-        AccountHubAPI.auth(host: cfg.accountHost, port: cfg.accountPort,
+        AccountHubAPI.auth(host: HubEndpoint.host, port: HubEndpoint.port,
                            user: cfg.userName, password: cfg.password) { result in
             DispatchQueue.main.async {
                 busy = false

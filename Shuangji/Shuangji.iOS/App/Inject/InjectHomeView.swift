@@ -26,7 +26,7 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Text("推荐：纯本地三层（GOT + tersafe DATA + 叶子上报）— 不依赖网络、不 dlopen")
+                Text("推荐：内存补丁（GOT+DATA，默认不改 TEXT）")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -156,7 +156,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "内存补丁完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "内存补丁成功"
-                    alertMsg = "纯本地三层完成\n\(BuiltinInjector.lastTargetPath)\n\nA=GOT  B=tersafe DATA  C=叶子上报(COREREPORT等)\n不碰总闸/扫描器，不依赖网络。\n退游戏需重做。到「内存」页看 data/leaf 计数。"
+                    alertMsg = "内存补丁完成\n\(BuiltinInjector.lastTargetPath)\n\n仅 GOT+DATA（已关叶子 TEXT，防闪退）。\n退游戏需重做。到「内存」页查看状态。"
                     showAlert = true
                     reload()
                 }

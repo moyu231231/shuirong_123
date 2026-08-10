@@ -7,32 +7,27 @@ struct LinkSettingsView: View {
     @State private var cfg = AppConfig.load()
     @State private var vpnState = ""
     @State private var info = ""
-    @State private var busy = false
 
     var body: some View {
         NavigationView {
             Form {
                 Section(header: Text("账号"), footer: Text("已登录：\(AuthSession.userName)")) {
-                    Text("中枢 \(cfg.accountHost):\(cfg.accountPort)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                     Button("退出登录", role: .destructive) {
                         onLogout?()
                     }
                 }
 
-                Section(header: Text("本机拦截"), footer: Text("不依赖 PC 网关。打开隧道后按工作模式在本机丢弃/清洗目标包。局内请用「修改」。")) {
-                    Toggle("启用本机拦截", isOn: $cfg.localInterceptEnabled)
-                    Toggle("上行 4013（举报/异常）", isOn: $cfg.blockUplink4013)
-                    Toggle("下行检测文件", isOn: $cfg.blockDownlinkDetect)
-                    Toggle("NJ 异常包", isOn: $cfg.blockNjReport0E)
-                    Toggle("标记清洗 23/09", isOn: $cfg.neuterNjMarkers)
+                Section(header: Text("本机规则"), footer: Text("规则保存在本机，配合「内存补丁」使用。不再拉起全局 VPN（旧版会劫持路由导致全机断网）。若曾连接过，请点下方断开。")) {
+                    Toggle("启用本机规则", isOn: $cfg.localInterceptEnabled)
+                    Toggle("拦上行 4013（举报/异常）", isOn: $cfg.blockUplink4013)
+                    Toggle("拦下行检测文件", isOn: $cfg.blockDownlinkDetect)
+                    Toggle("拦 NJ 异常包", isOn: $cfg.blockNjReport0E)
+                    Toggle("清洗标记 23/09", isOn: $cfg.neuterNjMarkers)
                 }
 
-                Section(header: Text("工作模式"), footer: Text("读取/大厅：放行 65010 以便上号。进局点「修改」才拦举报与检测文件。")) {
-                    modeButton(title: "读取", subtitle: "上号期，不拦 65010", tag: 1)
-                    modeButton(title: "大厅", subtitle: "只洗 NJ", tag: 3)
-                    modeButton(title: "修改", subtitle: "局内：本机拦 4013/检测文件", tag: 2)
+                Section(header: Text("工作模式"), footer: Text("上号用「大厅」（不拦 65010）。进局切「修改」。")) {
+                    modeButton(title: "大厅", subtitle: "上号/大厅：只洗 NJ", tag: 3)
+                    modeButton(title: "修改", subtitle: "局内：拦 4013/检测文件", tag: 2)
                     modeButton(title: "待机", subtitle: "全放行", tag: 0)
                     Text("当前：\(modeName(cfg.workMode))")
                         .font(.footnote)
@@ -42,27 +37,29 @@ struct LinkSettingsView: View {
                     }
                 }
 
-                Section("隧道") {
-                    Toggle("经上游 SOCKS（一般关闭）", isOn: $cfg.useUpstreamSocks)
-                    if cfg.useUpstreamSocks {
-                        TextField("节点", text: $cfg.host)
-                            .textInputAutocapitalization(.never)
-                        TextField("SOCKS 端口", value: $cfg.socksPort, format: .number)
-                            .keyboardType(.numberPad)
-                    }
+                Section("网络") {
                     if !vpnState.isEmpty {
                         Text(vpnState).foregroundColor(.secondary)
                     }
                     Button("保存设置") {
+                        // 若仍停在已删除的「读取」模式，自动落到大厅
+                        if cfg.workMode == 1 { cfg.workMode = 3 }
+                        cfg.useUpstreamSocks = false
+                        cfg.accountHost = HubEndpoint.host
+                        cfg.accountPort = HubEndpoint.port
                         cfg.save()
-                        info = "已保存（隧道会自动重载）"
+                        info = "已保存"
                     }
-                    Button("连接本机拦截") { startVPN() }
-                    Button("断开") { stopVPN() }
+                    Button("断开旧版全局隧道", role: .destructive) { stopVPN() }
                 }
             }
             .navigationTitle("链路")
-            .onAppear { cfg = AppConfig.load() }
+            .onAppear {
+                cfg = AppConfig.load()
+                if cfg.workMode == 1 { cfg.workMode = 3; cfg.save() }
+                // 进页自动尝试断开可能仍连着的黑网隧道
+                stopVPNQuiet()
+            }
         }
         .navigationViewStyle(.stack)
     }
@@ -72,7 +69,7 @@ struct LinkSettingsView: View {
         Button {
             cfg.workMode = tag
             cfg.save()
-            info = "已切换为\(modeName(tag))（纯本机，不经引擎）"
+            info = "已切换为\(modeName(tag))"
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -85,50 +82,29 @@ struct LinkSettingsView: View {
                 }
             }
         }
-        .disabled(busy)
     }
 
     private func modeName(_ m: Int) -> String {
         switch m {
         case 0: return "待机"
-        case 1: return "读取"
         case 2: return "修改"
         case 3: return "大厅"
-        default: return "未知"
-        }
-    }
-
-    private func startVPN() {
-        cfg.save()
-        NETunnelProviderManager.loadAllFromPreferences { list, _ in
-            let m = list?.first ?? NETunnelProviderManager()
-            let proto = NETunnelProviderProtocol()
-            proto.providerBundleIdentifier = "com.shuiyong.ports.tunnel"
-            proto.serverAddress = "local-intercept"
-            m.protocolConfiguration = proto
-            m.localizedDescription = "水溶C本机拦截"
-            m.isEnabled = true
-            m.saveToPreferences { err in
-                if let err {
-                    DispatchQueue.main.async { vpnState = err.localizedDescription }
-                    return
-                }
-                m.loadFromPreferences { _ in
-                    do {
-                        try m.connection.startVPNTunnel()
-                        DispatchQueue.main.async { vpnState = "本机拦截已连接" }
-                    } catch {
-                        DispatchQueue.main.async { vpnState = error.localizedDescription }
-                    }
-                }
-            }
+        default: return "大厅"
         }
     }
 
     private func stopVPN() {
         NETunnelProviderManager.loadAllFromPreferences { list, _ in
             list?.first?.connection.stopVPNTunnel()
-            DispatchQueue.main.async { vpnState = "已断开" }
+            DispatchQueue.main.async { vpnState = "已断开全局隧道（网络应恢复）" }
+        }
+    }
+
+    private func stopVPNQuiet() {
+        NETunnelProviderManager.loadAllFromPreferences { list, _ in
+            guard let m = list?.first, m.connection.status != .disconnected else { return }
+            m.connection.stopVPNTunnel()
+            DispatchQueue.main.async { vpnState = "已自动断开旧隧道" }
         }
     }
 }

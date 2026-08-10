@@ -593,26 +593,34 @@ int main(int argc, char **argv) {
     }
     fprintf(stdout, "stub @ 0x%llx anon=%d\n", (unsigned long long)stub, stub_anon);
 
-    raddr_t slide = 0;
-    image_slide(task, tersafe, &slide);
-
-    /* A: GOT (no suspend) */
+    /* A: GOT（最稳）. C 叶子 TEXT 易闪退，默认关闭。 */
     int got_hits = rewrite_gots(task, imgs, nimg, tersafe, addrs, naddr, stub);
     fprintf(stdout, "got_rewrites=%d\n", got_hits);
 
-    /* B+C under short suspend */
+    /* B: DATA 指针（短暂停）— 不改 TEXT */
     task_suspend(task);
     int data_hits = rewrite_tersafe_data_ptrs(task, tersafe, addrs, naddr, stub);
     fprintf(stdout, "data_rewrites=%d\n", data_hits);
-    int leaf_ok = patch_leaf_rvas(task, tersafe, slide, anchor);
-    fprintf(stdout, "leaf_ok=%d\n", leaf_ok);
+    int leaf_ok = 0;
+    int want_leaf = 0;
+    for (int ai = 2; ai < argc; ai++) {
+        if (!strcmp(argv[ai], "--leaf")) want_leaf = 1;
+    }
+    if (want_leaf) {
+        raddr_t slide = 0;
+        image_slide(task, tersafe, &slide);
+        leaf_ok = patch_leaf_rvas(task, tersafe, slide, anchor);
+        fprintf(stdout, "leaf_ok=%d\n", leaf_ok);
+    } else {
+        fprintf(stdout, "leaf skipped (default off)\n");
+    }
     task_resume(task);
 
     free(imgs);
     mach_port_deallocate(mach_task_self(), task);
 
     char buf[220];
-    if (data_hits > 0 || leaf_ok > 0) {
+    if (got_hits > 0 || data_hits > 0 || leaf_ok > 0) {
         snprintf(buf, sizeof(buf),
                  "OK mempatch got=%d data=%d leaf=%d syms=%d pid=%d time=%ld",
                  got_hits, data_hits, leaf_ok, naddr, (int)pid, (long)time(NULL));
@@ -622,8 +630,8 @@ int main(int argc, char **argv) {
     }
 
     snprintf(buf, sizeof(buf),
-             "FAIL mempatch got=%d data=0 leaf=0 syms=%d (need data/leaf; check tersafe ver)",
-             got_hits, naddr);
+             "FAIL mempatch got=0 data=0 leaf=0 syms=%d",
+             naddr);
     write_status(buf);
     fprintf(stdout, "%s\n", buf);
     return 8;
