@@ -111,7 +111,9 @@ if curl -fL --retry 3 -o "$TF_TMP/tf.tipa" "$TF_URL"; then
     CTB_DIR="$(cd "$(dirname "$CTB")" && pwd)"
     echo "TrollFools 工具目录: $CTB_DIR"
     # 拷贝可执行工具
-    for tool in ct_bypass ldid insert_dylib optool install_name_tool chown cp mkdir mv rm; do
+    # iOS 15 需要 cp-15 / mkdir-15 等；16+ 用无后缀名
+    for tool in ct_bypass ldid insert_dylib optool install_name_tool \
+                chown cp cp-15 mkdir mkdir-15 mv mv-15 rm rm-15; do
       if [[ -f "$CTB_DIR/$tool" ]]; then
         cp -f "$CTB_DIR/$tool" "$APP_PATH/$tool"
         chmod +x "$APP_PATH/$tool"

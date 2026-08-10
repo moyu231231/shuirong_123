@@ -412,12 +412,14 @@ static void chown_installd(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chown33|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
     const char *app = NULL;
     const char *src = NULL;
+    const char *dst = NULL;
+    const char *path = NULL;
     const char *exe = NULL;
     const char *dylib = "@rpath/ApolloNetService.dylib";
     const char *name = "ApolloNetService.dylib";
@@ -425,12 +427,38 @@ int main(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--app") && i + 1 < argc) app = argv[++i];
         else if (!strcmp(argv[i], "--src") && i + 1 < argc) src = argv[++i];
+        else if (!strcmp(argv[i], "--dst") && i + 1 < argc) dst = argv[++i];
+        else if (!strcmp(argv[i], "--path") && i + 1 < argc) path = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--dylib") && i + 1 < argc) dylib = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--weak")) weak = 1;
         else if (!strcmp(argv[i], "--strong")) weak = 0;
         else if (!strcmp(argv[i], "--rpath") && i + 1 < argc) i++;
+    }
+
+    /* 文件系统小工具：以 root persona spawn 后在本进程内读写，不依赖 /bin/cp */
+    if (!strcmp(mode, "mkdir")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 1; }
+        if (mkdir_p(path) != 0) { perror("mkdir"); return 2; }
+        return 0;
+    }
+    if (!strcmp(mode, "cp")) {
+        if (!src || !dst) { fprintf(stderr, "need --src --dst\n"); return 1; }
+        unlink(dst);
+        if (copy_file(src, dst) != 0) { perror("cp"); return 2; }
+        chown_installd(dst);
+        return 0;
+    }
+    if (!strcmp(mode, "rm")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 1; }
+        unlink(path);
+        return 0;
+    }
+    if (!strcmp(mode, "chown33")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 1; }
+        chown_installd(path);
+        return 0;
     }
 
     if (!strcmp(mode, "deploy")) {

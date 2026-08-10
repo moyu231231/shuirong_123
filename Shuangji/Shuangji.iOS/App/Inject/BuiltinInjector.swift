@@ -60,17 +60,19 @@ enum BuiltinInjector {
         let dest = fwk.appendingPathComponent(dylibFileName)
         let team = app.teamID.isEmpty ? "0000000000" : app.teamID
 
-        // 1) 准备目录 + 拷贝 dylib
-        _ = SpawnUtil.rootRun("/bin/mkdir", args: ["-p", fwk.path])
-        _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", dest.path])
-        let cp = SpawnUtil.rootRun("/bin/cp", args: ["-f", src.path, dest.path])
-        if cp.code != 0 {
-            // 部分设备 /bin/cp 不可用，退回 App 内 cp
-            if let appCp = toolURL("cp") {
-                let r = SpawnUtil.rootRun(appCp.path, args: ["-f", src.path, dest.path])
-                if r.code != 0 { throw InjectError.failed("复制 dylib 失败") }
-            } else {
-                throw InjectError.failed("复制 dylib 失败")
+        // 1) 准备目录 + 拷贝 dylib（iOS 15 无 /bin/cp，用 syinject 在 root 进程内读写）
+        guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
+        var r = rootFs(sy, "mkdir", ["--path", fwk.path])
+        if r.code != 0 {
+            throw InjectError.failed("创建 Frameworks 失败：\(r.detail)")
+        }
+        _ = rootFs(sy, "rm", ["--path", dest.path])
+        r = rootFs(sy, "cp", ["--src", src.path, "--dst", dest.path])
+        if r.code != 0 {
+            // 再试 TrollFools 自带的 cp-15（iOS 15）/ cp（iOS 16+）
+            if !copyWithBundledCp(src: src.path, dst: dest.path) {
+                let more = r.detail.isEmpty ? "exit \(r.code)" : r.detail
+                throw InjectError.failed("复制 dylib 失败：\(more)")
             }
         }
 
@@ -81,7 +83,7 @@ enum BuiltinInjector {
 
         // 3) 备份，失败可回滚
         let bak = macho.path + ".sy_bak"
-        _ = SpawnUtil.rootRun("/bin/cp", args: ["-f", macho.path, bak])
+        _ = rootFs(sy, "cp", ["--src", macho.path, "--dst", bak])
 
         // 4) insert_dylib —— 与 TrollFools 相同参数
         let loadName = "@rpath/\(dylibFileName)"
@@ -96,8 +98,9 @@ enum BuiltinInjector {
             ins = SpawnUtil.rootRun(insert.path, args: args)
         }
         if ins.code != 0 {
-            _ = SpawnUtil.rootRun("/bin/cp", args: ["-f", bak, macho.path])
-            _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", dest.path, bak])
+            _ = rootFs(sy, "cp", ["--src", bak, "--dst", macho.path])
+            _ = rootFs(sy, "rm", ["--path", dest.path])
+            _ = rootFs(sy, "rm", ["--path", bak])
             throw InjectError.failed("insert_dylib 失败：\(ins.err.isEmpty ? ins.out : ins.err)")
         }
 
@@ -115,12 +118,12 @@ enum BuiltinInjector {
         do {
             try resign(ldid: ldid.path, ctb: ctb.path, path: dest.path, team: team, keepEnt: false)
             try resign(ldid: ldid.path, ctb: ctb.path, path: macho.path, team: team, keepEnt: true)
-            _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["-R", "33:33", dest.path])
-            _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["-R", "33:33", macho.path])
+            _ = rootFs(sy, "chown33", ["--path", dest.path])
+            _ = rootFs(sy, "chown33", ["--path", macho.path])
         } catch {
-            _ = SpawnUtil.rootRun("/bin/cp", args: ["-f", bak, macho.path])
-            _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", dest.path])
-            _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", bak])
+            _ = rootFs(sy, "cp", ["--src", bak, "--dst", macho.path])
+            _ = rootFs(sy, "rm", ["--path", dest.path])
+            _ = rootFs(sy, "rm", ["--path", bak])
             throw error
         }
 
@@ -129,10 +132,10 @@ enum BuiltinInjector {
         let markBody = macho.path
         let tmp = NSTemporaryDirectory() + "sy_mark_\(UUID().uuidString)"
         try? markBody.write(toFile: tmp, atomically: true, encoding: .utf8)
-        _ = SpawnUtil.rootRun("/bin/cp", args: ["-f", tmp, mark.path])
+        _ = rootFs(sy, "cp", ["--src", tmp, "--dst", mark.path])
         try? FileManager.default.removeItem(atPath: tmp)
-        _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", bak])
-        _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["33:33", mark.path])
+        _ = rootFs(sy, "rm", ["--path", bak])
+        _ = rootFs(sy, "chown33", ["--path", mark.path])
     }
 
     static func eject(from app: AppEntry) throws {
@@ -140,6 +143,7 @@ enum BuiltinInjector {
         let fwk = app.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
         let dest = fwk.appendingPathComponent(dylibFileName)
         let mark = fwk.appendingPathComponent(".sy_injected")
+        let sy = toolURL("syinject")
 
         // 若有记录的 macho，用 optool 卸 LC
         if let machoPath = try? String(contentsOf: mark, encoding: .utf8),
@@ -155,12 +159,29 @@ enum BuiltinInjector {
             }
         }
 
-        _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", dest.path])
-        _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", fwk.appendingPathComponent("ShuiyongMem.dylib").path])
-        _ = SpawnUtil.rootRun("/bin/rm", args: ["-f", mark.path])
+        if let sy {
+            _ = rootFs(sy, "rm", ["--path", dest.path])
+            _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent("ShuiyongMem.dylib").path])
+            _ = rootFs(sy, "rm", ["--path", mark.path])
+        }
     }
 
     // MARK: - helpers
+
+    private static func rootFs(_ sy: URL, _ mode: String, _ args: [String]) -> (code: Int32, detail: String) {
+        let r = SpawnUtil.rootRun(sy.path, args: [mode] + args)
+        let detail = r.err.isEmpty ? r.out : r.err
+        return (r.code, detail.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// iOS 15 用 cp-15，16+ 用 cp（与 TrollFools 一致）
+    private static func copyWithBundledCp(src: String, dst: String) -> Bool {
+        for n in ["cp-15", "cp"] {
+            guard let u = toolURL(n) else { continue }
+            if SpawnUtil.rootRun(u.path, args: ["-f", src, dst]).code == 0 { return true }
+        }
+        return false
+    }
 
     private static func resign(ldid: String, ctb: String, path: String, team: String, keepEnt: Bool) throws {
         if keepEnt {
