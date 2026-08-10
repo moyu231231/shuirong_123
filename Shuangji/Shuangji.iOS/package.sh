@@ -71,12 +71,19 @@ if [[ -z "$APP_PATH" ]]; then
 fi
 echo "APP=$APP_PATH"
 
-echo "==> [4/6] 编 syinject、拉取 ct_bypass/ldid、塞进 App"
+echo "==> [4/6] 编 syinject/sy_mempatch、拉取 ct_bypass/ldid、塞进 App"
 mkdir -p "$APP_PATH"
-clang -arch arm64 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+SDKROOT_IOS="$(xcrun --sdk iphoneos --show-sdk-path)"
+clang -arch arm64 -isysroot "$SDKROOT_IOS" \
   -miphoneos-version-min=15.0 -O2 \
   -o "$APP_PATH/syinject" "$ROOT/Tools/syinject.c"
 chmod +x "$APP_PATH/syinject"
+# 无 dylib 远程内存补丁（task_for_pid + GOT/prologue）
+clang -arch arm64 -isysroot "$SDKROOT_IOS" \
+  -miphoneos-version-min=15.0 -O2 \
+  -o "$APP_PATH/sy_mempatch" "$ROOT/Tools/sy_mempatch.c"
+chmod +x "$APP_PATH/sy_mempatch"
+echo "  + sy_mempatch"
 
 # 注入用 dylib：只当资源拷进 App 根目录，禁止放进 Frameworks（避免被误加载）
 DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
@@ -212,7 +219,7 @@ for d in "$APP_PATH"/libcrypto*.dylib "$APP_PATH"/libssl*.dylib; do
 done
 [[ -f "$APP_PATH/sy_ports.dylib" ]] && ldid -S "$APP_PATH/sy_ports.dylib" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
-# opainject 必须带 task_for_pid 权限（opa334 模板）
+# opainject / sy_mempatch 必须带 task_for_pid 权限
 OPA_ENT="$ROOT/entitlements/opainject.entitlements"
 if [[ -f "$APP_PATH/opainject" ]]; then
   if [[ -f "$OPA_ENT" ]]; then
@@ -220,6 +227,14 @@ if [[ -f "$APP_PATH/opainject" ]]; then
   else
     ldid -S "$APP_PATH/opainject" || true
   fi
+fi
+if [[ -f "$APP_PATH/sy_mempatch" ]]; then
+  if [[ -f "$OPA_ENT" ]]; then
+    ldid -S"$OPA_ENT" "$APP_PATH/sy_mempatch" || ldid -S "$APP_PATH/sy_mempatch" || true
+  else
+    ldid -S "$APP_PATH/sy_mempatch" || true
+  fi
+  echo "  signed sy_mempatch"
 fi
 # 扩展
 EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"

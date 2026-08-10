@@ -1,7 +1,7 @@
 import Foundation
 
-/// 默认：动态注入（不改游戏磁盘 Mach-O，opainject 进运行中进程）。
-/// 磁盘 insert_dylib 会被 ACE 扫 LC/文件 → 一进游戏就拉闸。
+/// 默认：无 dylib 远程内存补丁（task_for_pid 改 GOT/导出，不 dlopen）。
+/// opainject/磁盘注入会新增镜像或改 LC，易被扫。
 enum BuiltinInjector {
 
     /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名
@@ -59,10 +59,9 @@ enum BuiltinInjector {
     }
 
     /*
-     隐蔽动态注入模板（综合）：
+     隐蔽动态注入模板（综合，备选）：
        - opa334/opainject：ROP dlopen，不改 Mach-O LC
        - Titanium：dylib 放进目标 .app/Frameworks（像系统库），注入后删磁盘文件
-       - TrollTitan：等进程就绪再注；不落 .sy_injected 标记
      */
     /// 伪装文件名：不占游戏已有库，看起来像系统/私有支持库
     private static let stealthNames = [
@@ -73,7 +72,80 @@ enum BuiltinInjector {
         "libquic_migration.dylib"
     ]
 
-    /// 动态注入：游戏干净启动 → 等进程 → opainject（不写 LC_LOAD）
+    /// 推荐：无 dylib 内存补丁——干净启动 → 等 tersafe → sy_mempatch
+    static func memPatch(into app: AppEntry, settleSeconds: Int = 40) throws {
+        guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
+        guard let mp = toolURL("sy_mempatch") else {
+            throw InjectError.noTool("sy_mempatch（请重装新 tipa）")
+        }
+
+        if isInjected(bundleURL: app.bundleURL) {
+            try eject(from: app)
+        }
+
+        terminate(app: app)
+        Thread.sleep(forTimeInterval: 0.8)
+        if !SYOpenApplicationWithBundleID(app.bundleID) {
+            throw InjectError.failed("无法打开游戏，请手动打开后再点内存补丁")
+        }
+
+        let needles: [String] = {
+            var a: [String] = []
+            let p = app.bundleURL.path
+            if !p.isEmpty { a.append(p) }
+            a.append(app.bundleURL.lastPathComponent)
+            if let exe = locateExecutable(in: app.bundleURL) {
+                a.append(exe.lastPathComponent)
+            }
+            return a
+        }()
+
+        var pid = 0
+        for _ in 0..<120 {
+            Thread.sleep(forTimeInterval: 1)
+            for n in needles {
+                let pr = SpawnUtil.rootRun(sy.path, args: ["pid", "--contains", n])
+                if pr.code == 0,
+                   let v = Int(pr.out.trimmingCharacters(in: .whitespacesAndNewlines)), v > 1 {
+                    pid = v
+                    break
+                }
+            }
+            if pid > 1 { break }
+        }
+        if pid <= 1 {
+            throw InjectError.failed("未找到游戏进程。请先手动打开游戏，再点「内存补丁」。")
+        }
+
+        let jitter = Int.random(in: 0...15)
+        let wait = max(12, settleSeconds + jitter)
+        Thread.sleep(forTimeInterval: TimeInterval(wait))
+
+        var still = false
+        for n in needles {
+            let pr = SpawnUtil.rootRun(sy.path, args: ["pid", "--contains", n])
+            if pr.code == 0,
+               let v = Int(pr.out.trimmingCharacters(in: .whitespacesAndNewlines)), v == pid {
+                still = true
+                break
+            }
+        }
+        if !still {
+            throw InjectError.failed("等待期间游戏已退出，请重试")
+        }
+
+        let r = SpawnUtil.rootRun(mp.path, args: ["\(pid)"])
+        let msg = (r.err.isEmpty ? r.out : r.err).trimmingCharacters(in: .whitespacesAndNewlines)
+        if r.code != 0 {
+            throw InjectError.failed("内存补丁失败(pid=\(pid))：\(msg.isEmpty ? "exit \(r.code)" : msg)")
+        }
+
+        lastRuntimePID = pid
+        lastTargetPath = "mempatch pid=\(pid) \(msg.split(separator: "\n").last.map(String.init) ?? "")"
+        setRuntimeMarked(app.bundleID, on: true)
+    }
+
+    /// 备选：动态注入（opainject dlopen，会新增镜像）
     static func runtimeInject(into app: AppEntry, settleSeconds: Int = 35) throws {
         guard let src = bundledDylibURL else { throw InjectError.noDylib }
         guard let ldid = toolURL("ldid") else { throw InjectError.noTool("ldid") }

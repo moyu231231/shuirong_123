@@ -26,7 +26,7 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Text("隐蔽动态注入（opainject+Titanium）：伪装进 Frameworks → 延时挂载 → 删磁盘文件")
+                Text("推荐：无 dylib 内存补丁（task_for_pid 改 GOT/入口，不 dlopen、不落库）")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -78,7 +78,7 @@ struct InjectHomeView: View {
                                             .font(.caption2)
                                             .foregroundColor(.orange)
                                     } else if BuiltinInjector.isRuntimeMarked(app.bundleID) {
-                                        Text("曾动态注入")
+                                        Text("曾内存补丁/注入")
                                             .font(.caption2)
                                             .foregroundColor(.green)
                                     }
@@ -88,8 +88,9 @@ struct InjectHomeView: View {
                                     ProgressView()
                                 } else {
                                     Menu {
-                                        Button("动态注入（推荐）") { runtimeInject(app) }
+                                        Button("内存补丁（推荐）") { memPatch(app) }
                                         Button("打开游戏") { launch(app.bundleID) }
+                                        Button("动态注入（备选）") { runtimeInject(app) }
                                         if app.isInjected {
                                             Button("清磁盘残留", role: .destructive) { eject(app) }
                                         }
@@ -143,6 +144,32 @@ struct InjectHomeView: View {
     private func launch(_ bundleID: String) {
         let ok = SYOpenApplicationWithBundleID(bundleID)
         banner = ok ? "正在打开…" : "打开失败，请手动点图标"
+    }
+
+    private func memPatch(_ app: AppEntry) {
+        busyID = app.bundleID
+        banner = "内存补丁中：启动 → 等 tersafe → 远程改 GOT/入口…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try BuiltinInjector.memPatch(into: app, settleSeconds: 40)
+                DispatchQueue.main.async {
+                    busyID = nil
+                    banner = "内存补丁完成 pid=\(BuiltinInjector.lastRuntimePID)"
+                    alertTitle = "内存补丁成功"
+                    alertMsg = "无 dylib 远程补丁完成\n\(BuiltinInjector.lastTargetPath)\n\n未 dlopen、未改磁盘 LC。\n退游戏需重做。\n4013 仍靠网络层。"
+                    showAlert = true
+                    reload()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    busyID = nil
+                    banner = error.localizedDescription
+                    alertTitle = "内存补丁失败"
+                    alertMsg = error.localizedDescription
+                    showAlert = true
+                }
+            }
+        }
     }
 
     private func runtimeInject(_ app: AppEntry) {
