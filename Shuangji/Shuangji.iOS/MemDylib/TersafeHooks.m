@@ -2,6 +2,7 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach-o/dyld.h>
+#import <libkern/OSCacheControl.h>
 #import <sys/mman.h>
 #import <unistd.h>
 #import <string.h>
@@ -45,15 +46,18 @@ static int sy_make_rx(void *addr, size_t len) {
     return 0;
 }
 
+static void sy_flush_icache(void *addr, size_t len) {
+    /* iOS 无 ___clear_cache；用 Apple 的 sys_icache_invalidate */
+    sys_icache_invalidate(addr, len);
+}
+
 /// MOV X0, #0 ; RET
 static int sy_patch_ret0(void *fn) {
     if (!fn) return -1;
     uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u };
     if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
     memcpy(fn, code, sizeof(code));
-#if defined(__aarch64__)
-    __builtin___clear_cache((char *)fn, (char *)fn + sizeof(code));
-#endif
+    sy_flush_icache(fn, sizeof(code));
     sy_make_rx(fn, sizeof(code));
     return 0;
 }
@@ -64,9 +68,7 @@ static int sy_patch_ret(void *fn) {
     uint32_t code = 0xD65F03C0u;
     if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
     memcpy(fn, &code, sizeof(code));
-#if defined(__aarch64__)
-    __builtin___clear_cache((char *)fn, (char *)fn + sizeof(code));
-#endif
+    sy_flush_icache(fn, sizeof(code));
     sy_make_rx(fn, sizeof(code));
     return 0;
 }
