@@ -33,6 +33,14 @@ fi
 
 echo "==> [2/6] 生成工程"
 xcodegen generate --spec project.yml
+# 强制降到 Xcode 15 可读格式（防 XcodeGen 写出 objectVersion 77）
+PBX="$ROOT/Shuiyong.xcodeproj/project.pbxproj"
+if [[ -f "$PBX" ]]; then
+  sed -i.bak 's/objectVersion = [0-9]*;/objectVersion = 56;/' "$PBX" || true
+  sed -i.bak 's/compatibilityVersion = "Xcode 16[^"]*";/compatibilityVersion = "Xcode 15.0";/' "$PBX" || true
+  sed -i.bak 's/preferredProjectObjectVersion = [0-9]*;/preferredProjectObjectVersion = 56;/' "$PBX" || true
+  rm -f "$PBX.bak"
+fi
 
 echo "==> [3/6] 编译 App + dylib + Tunnel"
 rm -rf "$DERIVED"

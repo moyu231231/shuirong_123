@@ -3,7 +3,9 @@ options:
   bundleIdPrefix: com.shuiyong
   deploymentTarget:
     iOS: "14.0"
+  # 与 GitHub macos-14 / Xcode 15.4 对齐，避免 objectVersion 77
   xcodeVersion: "15.0"
+  objectVersion: 56
   createIntermediateGroups: true
 settings:
   base:

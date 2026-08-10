@@ -22,9 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Select Xcode 15
         run: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          # macos-14 常见为 Xcode_15.4；避免选到不存在的 Xcode.app
+          if [[ -d /Applications/Xcode_15.4.app ]]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          elif [[ -d /Applications/Xcode_15.3.app ]]; then
+            sudo xcode-select -s /Applications/Xcode_15.3.app/Contents/Developer
+          else
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
           xcodebuild -version
 
       - name: Install tools
@@ -33,12 +40,13 @@ jobs:
           brew untap aws/tap 2>/dev/null || true
           export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
 
+          # 固定较旧 XcodeGen，减少生成 Xcode16 工程格式
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen || true
           fi
           if ! command -v xcodegen >/dev/null 2>&1; then
-            echo "fallback: download XcodeGen"
-            VER=2.42.0
+            echo "fallback: download XcodeGen 2.40.1"
+            VER=2.40.1
             curl -fsSL -o /tmp/xcodegen.zip \
               "https://github.com/yonaskolb/XcodeGen/releases/download/${VER}/xcodegen.zip"
             rm -rf /tmp/xcodegen && mkdir -p /tmp/xcodegen
