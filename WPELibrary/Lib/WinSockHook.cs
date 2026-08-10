@@ -1,4 +1,4 @@
-﻿using EasyHook;
+using EasyHook;
 using System;
 using System.Net.Sockets;
 using System.Reflection;
@@ -276,7 +276,34 @@ namespace WPELibrary.Lib
             }
         }
 
-        #endregion                
+        #endregion
+
+        /// <summary>
+        /// 滤镜之后：3366 拦截计数 + 智能滤镜（收集/伪心跳替换）。
+        /// 全程吞异常，绝不因智能滤镜拖垮 Hook/进程。
+        /// </summary>
+        private static void ApplyAceAfterFilter(ref byte[] bNewBuffer, Socket_Cache.Filter.FilterAction filterAction, bool isSend)
+        {
+            try
+            {
+                if (bNewBuffer == null || bNewBuffer.Length == 0) return;
+
+                if (filterAction == Socket_Cache.Filter.FilterAction.Intercept)
+                {
+                    if (bNewBuffer.Length >= 10000 && bNewBuffer[0] == 0x33 && bNewBuffer[1] == 0x66)
+                        ACE_SmartFilter.Note3366Intercept();
+                    return;
+                }
+
+                // 收集模式下也允许处理超大包，但 ProcessBuffer 内部有快速预检
+                byte[] sf = ACE_SmartFilter.ProcessBuffer(bNewBuffer, isSend);
+                if (sf != null && sf.Length > 0) bNewBuffer = sf;
+            }
+            catch
+            {
+                // Hook 路径禁止抛出
+            }
+        }
 
         #region//Send_Hook
 
@@ -294,25 +321,11 @@ namespace WPELibrary.Lib
 
             try
             {
-                Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
+                Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, Length);
                 bRawBuffer = bBufferSpan.ToArray();
 
-                // ★ ACE清洗
-                byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                byte[] bPreFilter = bACE ?? bRawBuffer;
-                Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
-                byte[] bACE = ACE_Sanitizer.SanitizeOutbound((IntPtr)Socket, bRawBuffer);
-                Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
-                bRawBuffer = bBufferSpan.ToArray();
-
-                // ★ ACE清洗
-                byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                byte[] bPreFilter = bACE ?? bRawBuffer;
-                Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bBufferSpan, out bNewBuffer, ptType, new Socket_Cache.SocketPacket.SockAddr());
+                ApplyAceAfterFilter(ref bNewBuffer, FilterAction, isSend: true);
 
                 if (FilterAction == Socket_Cache.Filter.FilterAction.Intercept)
                 {
@@ -384,12 +397,8 @@ namespace WPELibrary.Lib
                     Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
                     bRawBuffer = bBufferSpan.ToArray();
 
-                    // ★ ACE清洗
-                    byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                    byte[] bPreFilter = bACE ?? bRawBuffer;
-                    Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                    Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                    Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bBufferSpan, out bNewBuffer, ptType, new Socket_Cache.SocketPacket.SockAddr());
+                    ApplyAceAfterFilter(ref bNewBuffer, FilterAction, isSend: false);
 
                     if (FilterAction == Socket_Cache.Filter.FilterAction.Intercept)
                     {
@@ -397,16 +406,15 @@ namespace WPELibrary.Lib
                     }
                     else
                     {
+                        // ★ UIN 随机化: 对 NJ 入站包 01 0A 00 23 进行 UIN 替换
+                        var uinResult = ACE_UINRandomizer.Randomize(bNewBuffer);
+                        if (uinResult != null) bNewBuffer = uinResult;
+
                         res = Math.Min(bNewBuffer.Length, res);
-                        Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
-                        bRawBuffer = bBufferSpan.ToArray();
+                        new Span<byte>(bNewBuffer).CopyTo(new Span<byte>((byte*)lpBuffer, res));
+                    }
 
-                        // ★ ACE清洗
-                        byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                        byte[] bPreFilter = bACE ?? bRawBuffer;
-                        Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                        Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                    _ = Socket_Operation.ProcessingHookResultAsync(Socket, bRawBuffer, bNewBuffer, res, ptType, FilterAction, new Socket_Cache.SocketPacket.SockAddr(), PacketTime);
                 }                
             }
             catch (Exception ex)
@@ -437,15 +445,11 @@ namespace WPELibrary.Lib
 
             try
             {
-                Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
+                Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, Length);
                 bRawBuffer = bBufferSpan.ToArray();
 
-                // ★ ACE清洗
-                byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                byte[] bPreFilter = bACE ?? bRawBuffer;
-                Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bBufferSpan, out bNewBuffer, ptType, To);
+                ApplyAceAfterFilter(ref bNewBuffer, FilterAction, isSend: true);
 
                 if (FilterAction == Socket_Cache.Filter.FilterAction.Intercept)
                 {
@@ -515,22 +519,8 @@ namespace WPELibrary.Lib
                     Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
                     bRawBuffer = bBufferSpan.ToArray();
 
-                    // ★ ACE清洗
-                    byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                    byte[] bPreFilter = bACE ?? bRawBuffer;
-                    Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                    Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
-                    byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                    Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
-                    bRawBuffer = bBufferSpan.ToArray();
-
-                    // ★ ACE清洗
-                    byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                    byte[] bPreFilter = bACE ?? bRawBuffer;
-                    Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                    Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                    Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bBufferSpan, out bNewBuffer, ptType, From);
+                    ApplyAceAfterFilter(ref bNewBuffer, FilterAction, isSend: false);
 
                     if (FilterAction == Socket_Cache.Filter.FilterAction.Intercept)
                     {
@@ -539,15 +529,10 @@ namespace WPELibrary.Lib
                     else
                     {
                         res = Math.Min(bNewBuffer.Length, res);
-                        Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
-                        bRawBuffer = bBufferSpan.ToArray();
+                        new Span<byte>(bNewBuffer).CopyTo(new Span<byte>((byte*)lpBuffer, res));
+                    }
 
-                        // ★ ACE清洗
-                        byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                        byte[] bPreFilter = bACE ?? bRawBuffer;
-                        Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                        Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                    _ = Socket_Operation.ProcessingHookResultAsync(Socket, bRawBuffer, bNewBuffer, res, ptType, FilterAction, From, PacketTime);
                 }                
             }
             catch (Exception ex)
@@ -589,21 +574,17 @@ namespace WPELibrary.Lib
                         byte[] bRawBuffer = null;
                         byte[] bNewBuffer = null;
 
-                        Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
+                        Span<byte> bBufferSpan = new Span<byte>((byte*)pWSABuffers[0].buf, BytesSent);                        
                         bRawBuffer = bBufferSpan.ToArray();
 
-                        // ★ ACE清洗
-                        byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                        byte[] bPreFilter = bACE ?? bRawBuffer;
-                        Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                        Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                        Socket_Cache.Filter.FilterAction filterAction =
                         Socket_Cache.FilterList.DoFilterList(
                             socket,
                             bBufferSpan,
                             out bNewBuffer,
                             packetType,
                             new Socket_Cache.SocketPacket.SockAddr());
+                        ApplyAceAfterFilter(ref bNewBuffer, filterAction, isSend: true);
 
                         if (filterAction == Socket_Cache.Filter.FilterAction.Intercept)
                         {
@@ -678,6 +659,7 @@ namespace WPELibrary.Lib
                                 out bNewBuffer,
                                 packetType,
                                 new Socket_Cache.SocketPacket.SockAddr());
+                        ApplyAceAfterFilter(ref bNewBuffer, filterAction, isSend: true);
 
                         if (filterAction == Socket_Cache.Filter.FilterAction.Intercept)
                         {
@@ -794,26 +776,17 @@ namespace WPELibrary.Lib
                             byte[] bRawBuffer = null;
                             byte[] bNewBuffer = null;
 
-                            Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
-                            bRawBuffer = bBufferSpan.ToArray();
-
-                            // ★ ACE清洗
-                            byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                            byte[] bPreFilter = bACE ?? bRawBuffer;
-                            Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                            Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
-                            byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)socket, bRawBuffer, BytesRecvd);
-                            byte[] bPreFilter = bACE ?? bRawBuffer;
-                            Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
+                            Span<byte> bufferSpan = new Span<byte>((byte*)pWSABuffers[0].buf, BytesRecvd);
+                            bRawBuffer = bufferSpan.ToArray();
 
                             Socket_Cache.Filter.FilterAction filterAction =
                                 Socket_Cache.FilterList.DoFilterList(
                                     socket,
-                                    bPreFilterSpan,
+                                    bufferSpan,
                                     out bNewBuffer,
                                     packetType,
                                     new Socket_Cache.SocketPacket.SockAddr());
+                            ApplyAceAfterFilter(ref bNewBuffer, filterAction, isSend: false);
 
                             int bytesToWrite = 0;
                             if (filterAction != Socket_Cache.Filter.FilterAction.Intercept)
@@ -947,21 +920,17 @@ namespace WPELibrary.Lib
                         byte[] bRawBuffer = null;
                         byte[] bNewBuffer = null;
 
-                        Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
+                        Span<byte> bBufferSpan = new Span<byte>((byte*)pWSABuffers[0].buf, BytesSent);
                         bRawBuffer = bBufferSpan.ToArray();
 
-                        // ★ ACE清洗
-                        byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                        byte[] bPreFilter = bACE ?? bRawBuffer;
-                        Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                        Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                        Socket_Cache.Filter.FilterAction filterAction =
                         Socket_Cache.FilterList.DoFilterList(
                             socket,
                             bBufferSpan,
                             out bNewBuffer,
                             packetType,
                             To);
+                        ApplyAceAfterFilter(ref bNewBuffer, filterAction, isSend: true);
 
                         if (filterAction == Socket_Cache.Filter.FilterAction.Intercept)
                         {
@@ -1038,6 +1007,7 @@ namespace WPELibrary.Lib
                                 out bNewBuffer,
                                 packetType,
                                 To);
+                        ApplyAceAfterFilter(ref bNewBuffer, filterAction, isSend: true);
 
                         if (filterAction == Socket_Cache.Filter.FilterAction.Intercept)
                         {
@@ -1158,21 +1128,17 @@ namespace WPELibrary.Lib
                             byte[] bRawBuffer = null;
                             byte[] bNewBuffer = null;
 
-                            Span<byte> bBufferSpan = new Span<byte>((byte*)lpBuffer, res);
-                            bRawBuffer = bBufferSpan.ToArray();
+                            Span<byte> bufferSpan = new Span<byte>((byte*)pWSABuffers[0].buf, BytesRecvd);
+                            bRawBuffer = bufferSpan.ToArray();
 
-                            // ★ ACE清洗
-                            byte[] bACE = ACE_Sanitizer.SanitizeInbound((IntPtr)Socket, bRawBuffer, res);
-                            byte[] bPreFilter = bACE ?? bRawBuffer;
-                            Span<byte> bPreFilterSpan = new Span<byte>(bPreFilter);
-
-                            Socket_Cache.Filter.FilterAction FilterAction = Socket_Cache.FilterList.DoFilterList(Socket, bPreFilterSpan, out bNewBuffer, ptType, From);
+                            Socket_Cache.Filter.FilterAction filterAction =
                                 Socket_Cache.FilterList.DoFilterList(
                                     socket,
                                     bufferSpan,
                                     out bNewBuffer,
                                     packetType,
                                     from);
+                            ApplyAceAfterFilter(ref bNewBuffer, filterAction, isSend: false);
 
                             int bytesToWrite = 0;
                             if (filterAction != Socket_Cache.Filter.FilterAction.Intercept)

@@ -7134,8 +7134,36 @@ namespace WPELibrary.Lib
 
                 try
                 {
-                    int dashIndex = lengthContent.IndexOf('-');
+                    // 支持 >=N 语法（大于等于）
+                    if (lengthContent.StartsWith(">="))
+                    {
+                        return int.TryParse(lengthContent.Substring(2), out int minLen) &&
+                               len >= minLen;
+                    }
 
+                    // 支持 >N 语法（严格大于）
+                    if (lengthContent.StartsWith(">"))
+                    {
+                        return int.TryParse(lengthContent.Substring(1), out int minLen) &&
+                               len > minLen;
+                    }
+
+                    // 支持 <=N 语法（小于等于）
+                    if (lengthContent.StartsWith("<="))
+                    {
+                        return int.TryParse(lengthContent.Substring(2), out int maxLen) &&
+                               len <= maxLen;
+                    }
+
+                    // 支持 <N 语法（严格小于）
+                    if (lengthContent.StartsWith("<"))
+                    {
+                        return int.TryParse(lengthContent.Substring(1), out int maxLen) &&
+                               len < maxLen;
+                    }
+
+                    // 原有：N-M 范围匹配
+                    int dashIndex = lengthContent.IndexOf('-');
                     if (dashIndex >= 0)
                     {
                         string fromStr = lengthContent.Substring(0, dashIndex);
@@ -7146,7 +7174,8 @@ namespace WPELibrary.Lib
                                len >= lenFrom &&
                                len <= lenTo;
                     }
-                    
+
+                    // 原有：精确长度匹配
                     return int.TryParse(lengthContent, out int exactLen) &&
                            len == exactLen;
                 }

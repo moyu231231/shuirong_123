@@ -51,7 +51,7 @@ namespace WPELibrary.Lib
             return ~crc;
         }
 
-        public static uint CRC32(byte[] data) => CRC32(data, 0, data.Length);
+        public static uint CRC32(byte[] data) { return CRC32(data, 0, data.Length); }
 
         // ============================================================
         // NJ 域名检测
@@ -117,14 +117,15 @@ namespace WPELibrary.Lib
         private static readonly byte[] TARGET_UIN = System.Text.Encoding.ASCII.GetBytes("8641756217741712662\0");
 
         // 6种 01 0A 标记: (u32 LE pattern, payload偏移)
-        private static readonly (uint, int)[] NJ_RULES = new (uint, int)[]
+        private struct NJRule { public uint Pattern; public int PayloadOffset; }
+        private static readonly NJRule[] NJ_RULES = new NJRule[]
         {
-            (0x23000A01, 42),  // 01 0A 00 23 → payload @ +42
-            (0x09000A01, 14),  // 01 0A 00 09 → payload @ +14
-            (0x08000A01, 14),  // 01 0A 00 08 → payload @ +14
-            (0x00010A01, 14),  // 01 0A 01 00 → payload @ +14
-            (0xF1000A01, 14),  // 01 0A 00 F1 → payload @ +14 (稀有)
-            (0x34B80A01, 14),  // 01 0A B8 34 → payload @ +14 (稀有)
+            new NJRule { Pattern = 0x23000A01, PayloadOffset = 42 },  // 01 0A 00 23 → payload @ +42
+            new NJRule { Pattern = 0x09000A01, PayloadOffset = 14 },  // 01 0A 00 09 → payload @ +14
+            new NJRule { Pattern = 0x08000A01, PayloadOffset = 14 },  // 01 0A 00 08 → payload @ +14
+            new NJRule { Pattern = 0x00010A01, PayloadOffset = 14 },  // 01 0A 01 00 → payload @ +14
+            new NJRule { Pattern = 0xF1000A01, PayloadOffset = 14 },  // 01 0A 00 F1 → payload @ +14 (稀有)
+            new NJRule { Pattern = 0x34B80A01, PayloadOffset = 14 },  // 01 0A B8 34 → payload @ +14 (稀有)
         };
 
         public static byte[] SanitizeNJInbound(byte[] data)
@@ -149,15 +150,15 @@ namespace WPELibrary.Lib
             }
 
             // payload清零: 6种标记
-            foreach (var (pattern, payloadOffset) in NJ_RULES)
+            foreach (var rule in NJ_RULES)
             {
-                byte[] marker = BitConverter.GetBytes(pattern);
+                byte[] marker = BitConverter.GetBytes(rule.Pattern);
                 for (int i = 0; i <= result.Length - 4; i++)
                 {
                     if (result[i] == marker[0] && result[i + 1] == marker[1]
                         && result[i + 2] == marker[2] && result[i + 3] == marker[3])
                     {
-                        int start = i + payloadOffset;
+                        int start = i + rule.PayloadOffset;
                         int end = Math.Min(start + 512, result.Length);
                         for (int j = start; j < end; j++)
                         {

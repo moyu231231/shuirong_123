@@ -76,13 +76,25 @@ if [[ -n "$DYLIB" ]]; then
   cp -f "$DYLIB" "$APP_PATH/Frameworks/ShuiyongMem.dylib" || true
 fi
 
-echo "==> [5/6] ldid 伪签"
+echo "==> [5/6] ldid 伪签（必须带 App.entitlements，否则注入页读不到已装应用）"
 ENT_APP="$ROOT/entitlements/App.entitlements"
 ENT_TUN="$ROOT/entitlements/Tunnel.entitlements"
 # 主程序
 MAIN_BIN="$APP_PATH/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist" 2>/dev/null || echo Shuiyong)"
 [[ -f "$MAIN_BIN" ]] || MAIN_BIN="$(find "$APP_PATH" -maxdepth 1 -type f -perm -111 | head -n1)"
+echo "MAIN_BIN=$MAIN_BIN"
 ldid -S"$ENT_APP" "$MAIN_BIN"
+# 核对关键 entitlement 是否已写入
+if command -v ldid >/dev/null; then
+  ENT_DUMP="$(ldid -e "$MAIN_BIN" 2>/dev/null || true)"
+  if ! grep -q "canmaplsdatabase" <<<"$ENT_DUMP"; then
+    echo "警告: 主程序 entitlement 可能未写入 canmaplsdatabase，重试一次"
+    ldid -S"$ENT_APP" "$MAIN_BIN"
+  fi
+  if ! grep -q "no-sandbox" <<<"$ENT_DUMP"; then
+    echo "警告: 主程序 entitlement 可能未写入 no-sandbox"
+  fi
+fi
 ldid -S"$ENT_APP" "$APP_PATH/syinject" 2>/dev/null || ldid -S "$APP_PATH/syinject" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
 # 扩展

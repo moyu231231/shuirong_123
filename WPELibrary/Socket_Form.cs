@@ -1,4 +1,4 @@
-﻿using Be.Windows.Forms;
+using Be.Windows.Forms;
 using EasyHook;
 using System;
 using System.Collections.Generic;
@@ -75,6 +75,7 @@ namespace WPELibrary
 
         private void Socket_Form_FormClosing(object sender, FormClosingEventArgs e)
         {
+            try { ACE_SmartFilter.SavePool(); } catch { }
             this.SaveConfigs_Parameter();
             this.ExitMainForm();
         }
@@ -246,69 +247,125 @@ namespace WPELibrary
 
         #endregion
 
-        #region//ACE总开关
+        #region//UIN随机化 / NJ智能滤镜 / 状态栏计数
 
         private ToolStripStatusLabel tlACE;
         private ToolStripStatusLabel tlACE_CNT;
+        private ToolStripStatusLabel tlIntercept;
+        private ToolStripStatusLabel tlIntercept_CNT;
+        private ToolStripStatusLabel tlHeartbeat;
+        private ToolStripStatusLabel tlHeartbeat_CNT;
+        private ACE_NJForm njForm;
 
         private void InitACEToggle()
         {
-            // 在 tsFilterList 工具栏添加 ACE 开关按钮
+            // 加载已保存的数据池
+            try { ACE_SmartFilter.LoadPool(); } catch { }
+
+            // 工具栏：UIN随机化开关按钮
             var btnACE = new ToolStripButton
             {
-                Text = "🛡 ACE",
+                Text = "\U0001F194 UIN ON",
                 DisplayStyle = ToolStripItemDisplayStyle.Text,
                 BackColor = System.Drawing.Color.FromArgb(0, 120, 0),
                 ForeColor = System.Drawing.Color.White,
-                ToolTipText = "ACE反作弊拦截开关 (绿色=开启, 红色=关闭)"
+                ToolTipText = "UIN随机化开关 (绿色=开启, 红色=关闭)"
             };
             btnACE.Click += (s, e) =>
             {
-                ACE_Sanitizer.EnableACE = !ACE_Sanitizer.EnableACE;
-                btnACE.BackColor = ACE_Sanitizer.EnableACE 
-                    ? System.Drawing.Color.FromArgb(0, 120, 0) 
+                ACE_UINRandomizer.EnableUIN = !ACE_UINRandomizer.EnableUIN;
+                btnACE.BackColor = ACE_UINRandomizer.EnableUIN
+                    ? System.Drawing.Color.FromArgb(0, 120, 0)
                     : System.Drawing.Color.FromArgb(180, 30, 30);
-                btnACE.Text = ACE_Sanitizer.EnableACE ? "🛡 ACE ON" : "🛡 ACE OFF";
-                Socket_Operation.DoLog("ACE", 
-                    ACE_Sanitizer.EnableACE ? "ACE拦截已开启" : "ACE拦截已关闭");
+                btnACE.Text = ACE_UINRandomizer.EnableUIN
+                    ? "\U0001F194 UIN ON"
+                    : "\U0001F194 UIN OFF";
+                Socket_Operation.DoLog("UIN",
+                    ACE_UINRandomizer.EnableUIN ? "UIN随机化已开启" : "UIN随机化已关闭");
             };
+
+            // 工具栏：NJ 智能滤镜面板
+            var btnNJ = new ToolStripButton
+            {
+                Text = "NJ智能滤镜",
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                BackColor = System.Drawing.Color.FromArgb(30, 80, 160),
+                ForeColor = System.Drawing.Color.White,
+                ToolTipText = "打开 NJ 数据处理/收集面板"
+            };
+            btnNJ.Click += (s, e) =>
+            {
+                if (njForm == null || njForm.IsDisposed)
+                    njForm = new ACE_NJForm();
+                if (!njForm.Visible)
+                    njForm.Show(this);
+                else
+                    njForm.Activate();
+            };
+
             this.tsFilterList.Items.Add(new ToolStripSeparator());
             this.tsFilterList.Items.Add(btnACE);
+            this.tsFilterList.Items.Add(btnNJ);
 
-            // 状态栏加 ACE 计数器
+            // 状态栏计数器：拦截次数 / 伪心跳替换 / UIN
+            tlIntercept = new ToolStripStatusLabel { Text = "拦截次数:", ForeColor = System.Drawing.Color.Gray };
+            tlIntercept_CNT = new ToolStripStatusLabel
+            {
+                Text = "0",
+                ForeColor = System.Drawing.Color.DarkRed,
+                Font = new System.Drawing.Font(this.ssSocketList.Font, System.Drawing.FontStyle.Bold)
+            };
+            tlHeartbeat = new ToolStripStatusLabel { Text = "伪心跳替换:", ForeColor = System.Drawing.Color.Gray };
+            tlHeartbeat_CNT = new ToolStripStatusLabel
+            {
+                Text = "0",
+                ForeColor = System.Drawing.Color.DarkOrange,
+                Font = new System.Drawing.Font(this.ssSocketList.Font, System.Drawing.FontStyle.Bold)
+            };
+            tlACE = new ToolStripStatusLabel { Text = "\U0001F194 UIN:", ForeColor = System.Drawing.Color.Gray };
             tlACE_CNT = new ToolStripStatusLabel
             {
                 Text = "0",
                 ForeColor = System.Drawing.Color.LimeGreen,
                 Font = new System.Drawing.Font(this.ssSocketList.Font, System.Drawing.FontStyle.Bold)
             };
-            tlACE = new ToolStripStatusLabel
-            {
-                Text = "🛡 ACE:",
-                ForeColor = System.Drawing.Color.Gray
-            };
-            // 插在 tlFilterExecute 后面
+
+            // 插在 tlFilterExecute_CNT 后面
             int idx = this.ssSocketList.Items.IndexOf(this.tlFilterExecute_CNT);
+            ToolStripItem[] extras =
+            {
+                new ToolStripSeparator(),
+                tlIntercept, tlIntercept_CNT,
+                new ToolStripSeparator(),
+                tlHeartbeat, tlHeartbeat_CNT,
+                new ToolStripSeparator(),
+                tlACE, tlACE_CNT
+            };
             if (idx >= 0)
             {
-                this.ssSocketList.Items.Insert(idx + 1, new ToolStripSeparator());
-                this.ssSocketList.Items.Insert(idx + 2, tlACE);
-                this.ssSocketList.Items.Insert(idx + 3, tlACE_CNT);
+                for (int i = 0; i < extras.Length; i++)
+                    this.ssSocketList.Items.Insert(idx + 1 + i, extras[i]);
             }
             else
             {
-                this.ssSocketList.Items.Add(new ToolStripSeparator());
-                this.ssSocketList.Items.Add(tlACE);
-                this.ssSocketList.Items.Add(tlACE_CNT);
+                foreach (var item in extras)
+                    this.ssSocketList.Items.Add(item);
             }
 
-            // 定时刷新计数器
+            // 每500ms 刷新计数器显示
             var timer = new System.Windows.Forms.Timer { Interval = 500 };
             timer.Tick += (s, e) =>
             {
-                tlACE_CNT.Text = ACE_Sanitizer.ACECount.ToString();
-                tlACE_CNT.ForeColor = ACE_Sanitizer.EnableACE 
-                    ? System.Drawing.Color.LimeGreen 
+                long interceptCnt = ACE_SmartFilter.Get3366InterceptCountFromFilter();
+                if (interceptCnt < ACE_SmartFilter.Intercept3366Count)
+                    interceptCnt = ACE_SmartFilter.Intercept3366Count;
+                tlIntercept_CNT.Text = interceptCnt.ToString();
+
+                tlHeartbeat_CNT.Text = ACE_SmartFilter.FakeHeartbeatReplaceCount.ToString();
+
+                tlACE_CNT.Text = ACE_UINRandomizer.UINCount.ToString();
+                tlACE_CNT.ForeColor = ACE_UINRandomizer.EnableUIN
+                    ? System.Drawing.Color.LimeGreen
                     : System.Drawing.Color.DarkRed;
             };
             timer.Start();
@@ -1065,6 +1122,9 @@ namespace WPELibrary
 
                 this.SaveConfigs_Parameter();
                 Socket_Cache.FilterList.InitFilterList_Count();
+
+                // 注册内置拦截规则（如3366大包拦截），已存在时自动跳过
+                ACE_FilterRules.Register();
 
                 ws.StartHook();
 

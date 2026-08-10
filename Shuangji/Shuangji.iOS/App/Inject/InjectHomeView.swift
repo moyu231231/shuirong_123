@@ -29,46 +29,61 @@ struct InjectHomeView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 8)
 
-                List {
-                    ForEach(filtered) { app in
-                        HStack(spacing: 12) {
-                            if let img = app.icon {
-                                Image(uiImage: img)
-                                    .resizable()
-                                    .frame(width: 44, height: 44)
-                                    .cornerRadius(10)
-                            } else {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.gray.opacity(0.25))
-                                    .frame(width: 44, height: 44)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(app.name).font(.headline)
-                                Text(app.bundleID)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                if app.isInjected {
-                                    Text("已注入")
-                                        .font(.caption2)
-                                        .foregroundColor(.green)
+                if apps.isEmpty {
+                    VStack(spacing: 12) {
+                        Spacer()
+                        Text("没有读到已安装应用")
+                            .font(.headline)
+                        Text("请用 TrollStore 重新安装本 tipa（旧包权限不足）。\n装好后点右上角「刷新」。")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(filtered) { app in
+                            HStack(spacing: 12) {
+                                if let img = app.icon {
+                                    Image(uiImage: img)
+                                        .resizable()
+                                        .frame(width: 44, height: 44)
+                                        .cornerRadius(10)
+                                } else {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.gray.opacity(0.25))
+                                        .frame(width: 44, height: 44)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(app.name).font(.headline)
+                                    Text(app.bundleID)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                    if app.isInjected {
+                                        Text("已注入")
+                                            .font(.caption2)
+                                            .foregroundColor(.green)
+                                    }
+                                }
+                                Spacer()
+                                if busyID == app.bundleID {
+                                    ProgressView()
+                                } else if app.isInjected {
+                                    Button("移除") { eject(app) }
+                                        .buttonStyle(.bordered)
+                                } else {
+                                    Button("注入") { inject(app) }
+                                        .buttonStyle(.borderedProminent)
                                 }
                             }
-                            Spacer()
-                            if busyID == app.bundleID {
-                                ProgressView()
-                            } else if app.isInjected {
-                                Button("移除") { eject(app) }
-                                    .buttonStyle(.bordered)
-                            } else {
-                                Button("注入") { inject(app) }
-                                    .buttonStyle(.borderedProminent)
-                            }
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
                     }
+                    .listStyle(.plain)
                 }
-                .listStyle(.plain)
             }
             .navigationTitle("注入")
             .searchable(text: $filter, prompt: "搜索")

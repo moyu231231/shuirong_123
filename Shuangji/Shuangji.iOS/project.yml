@@ -36,6 +36,10 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         CODE_SIGN_ENTITLEMENTS: entitlements/App.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: App/PrivateAPI/Shuiyong-Bridging-Header.h
+        CLANG_ENABLE_MODULES: YES
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/App/PrivateAPI"
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
