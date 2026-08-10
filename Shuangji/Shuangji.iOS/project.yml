@@ -43,10 +43,10 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
+    # 注意：ShuiyongMem 绝不能 link/embed 进主 App（constructor 会钩 dyld，主程序秒闪）
     dependencies:
       - target: ShuiyongTunnel
         embed: true
-      - target: ShuiyongMem
 
   ShuiyongTunnel:
     type: app-extension
@@ -85,3 +85,15 @@ targets:
           - "-framework"
           - Foundation
           - "-lpthread"
+
+schemes:
+  Shuiyong:
+    build:
+      targets:
+        ShuiyongMem: all
+        ShuiyongTunnel: all
+        Shuiyong: all
+    run:
+      config: Release
+    archive:
+      config: Release

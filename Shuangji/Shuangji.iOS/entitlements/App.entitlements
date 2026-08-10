@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- 网络扩展 + App Group（链路页） -->
+	<!-- 网络扩展 + App Group -->
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>
 		<string>packet-tunnel-provider</string>
@@ -12,23 +12,23 @@
 		<string>group.com.shuiyong.ports</string>
 	</array>
 
-	<!-- TrollStore：去沙盒（否则读不到别的 App） -->
+	<!--
+	  TrollStore 去沙盒（iOS 15.4 稳妥写法）：
+	  用 no-sandbox + container-required=false，不要再用 no-container=true
+	  （no-container 会拆掉 App 自身容器，SwiftUI/AppGroup 易启动闪退）
+	-->
 	<key>platform-application</key>
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
-	<key>com.apple.private.security.no-container</key>
-	<true/>
 	<key>com.apple.private.security.container-required</key>
 	<false/>
-	<key>com.apple.private.security.container-manager</key>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
 	<key>com.apple.private.security.storage.AppBundles</key>
 	<true/>
-	<key>com.apple.private.security.storage.AppDataContainers</key>
-	<true/>
 
-	<!-- 读已安装应用列表（LSApplicationWorkspace） -->
+	<!-- 读已安装应用 -->
 	<key>com.apple.private.coreservices.canmaplsdatabase</key>
 	<true/>
 	<key>com.apple.private.MobileContainerManager.allowed</key>
@@ -38,7 +38,7 @@
 	<key>com.apple.private.MobileContainerManager.otherIdLookup</key>
 	<true/>
 
-	<!-- 读写 App 包（注入 / 移除） -->
+	<!-- 读写别的 App 包（注入） -->
 	<key>com.apple.security.exception.files.absolute-path.read-write</key>
 	<array>
 		<string>/</string>

@@ -70,16 +70,34 @@ clang -arch arm64 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
   -o "$APP_PATH/syinject" "$ROOT/Tools/syinject.c"
 chmod +x "$APP_PATH/syinject"
 
-# 注入用 dylib：伪装文件名，降低 ACE 字符串扫描命中
+# 注入用 dylib：只当资源拷进 App 根目录，禁止放进 Frameworks（避免被误加载）
 DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
+if [[ -z "$DYLIB" ]]; then
+  echo "编译 ShuiyongMem ..."
+  xcodebuild \
+    -project Shuiyong.xcodeproj \
+    -target ShuiyongMem \
+    -configuration Release \
+    -sdk "$SDK" \
+    -destination 'generic/platform=iOS' \
+    -derivedDataPath "$DERIVED" \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY="" \
+    build
+  DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
+fi
 if [[ -n "$DYLIB" ]]; then
   cp -f "$DYLIB" "$APP_PATH/ApolloNetService.dylib"
-  mkdir -p "$APP_PATH/Frameworks"
-  cp -f "$DYLIB" "$APP_PATH/Frameworks/ApolloNetService.dylib" || true
-  # 兼容旧逻辑
   cp -f "$DYLIB" "$APP_PATH/ShuiyongMem.dylib" || true
+  # 若 Xcode 因旧依赖塞进了 Frameworks，删掉，防止主 App 启动加载
+  rm -f "$APP_PATH/Frameworks/ShuiyongMem.dylib" \
+        "$APP_PATH/Frameworks/ApolloNetService.dylib" 2>/dev/null || true
+else
+  echo "错误: 找不到 ShuiyongMem.dylib"; exit 1
 fi
 
+# 工具二进制放 App 根目录，不要进 Frameworks
 # 从 TrollFools tipa 抽出 ldid + ct_bypass（改 LC 后必须 CoreTrust 旁路，否则目标闪退）
 TF_VER="${TF_VER:-v4.3-253}"
 TF_URL="https://github.com/Lessica/TrollFools/releases/download/${TF_VER}/TrollFools_4.3-253.tipa"
