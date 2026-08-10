@@ -98,7 +98,7 @@ else
 fi
 
 # 工具二进制放 App 根目录，不要进 Frameworks
-# 从 TrollFools tipa 抽出 ldid + ct_bypass（改 LC 后必须 CoreTrust 旁路，否则目标闪退）
+# 从 TrollFools tipa 抽出完整工具链（ct_bypass 依赖同目录 libcrypto.3.dylib 等）
 TF_VER="${TF_VER:-v4.3-253}"
 TF_URL="https://github.com/Lessica/TrollFools/releases/download/${TF_VER}/TrollFools_4.3-253.tipa"
 TF_TMP="$(mktemp -d)"
@@ -106,18 +106,56 @@ echo "拉取 TrollFools 工具: $TF_URL"
 if curl -fL --retry 3 -o "$TF_TMP/tf.tipa" "$TF_URL"; then
   mkdir -p "$TF_TMP/x"
   unzip -q "$TF_TMP/tf.tipa" -d "$TF_TMP/x" || true
+  CTB="$(find "$TF_TMP/x" -type f -name ct_bypass | head -n1 || true)"
+  if [[ -n "$CTB" ]]; then
+    CTB_DIR="$(cd "$(dirname "$CTB")" && pwd)"
+    echo "TrollFools 工具目录: $CTB_DIR"
+    # 拷贝可执行工具
+    for tool in ct_bypass ldid insert_dylib optool install_name_tool chown cp mkdir mv rm; do
+      if [[ -f "$CTB_DIR/$tool" ]]; then
+        cp -f "$CTB_DIR/$tool" "$APP_PATH/$tool"
+        chmod +x "$APP_PATH/$tool"
+        echo "  + $tool"
+      fi
+    done
+    # 拷贝同目录所有 dylib（libcrypto.3 / libssl.3 等，ct_bypass 必需）
+    shopt -s nullglob
+    for dylib in "$CTB_DIR"/*.dylib; do
+      bn="$(basename "$dylib")"
+      cp -f "$dylib" "$APP_PATH/$bn"
+      chmod +x "$APP_PATH/$bn" || true
+      echo "  + $bn"
+    done
+    shopt -u nullglob
+  else
+    echo "警告: tipa 里找不到 ct_bypass"
+  fi
+  # 兜底：全包再搜一遍工具名
   for tool in ct_bypass ldid insert_dylib; do
-    f="$(find "$TF_TMP/x" -type f -name "$tool" | head -n1 || true)"
-    if [[ -n "$f" ]]; then
-      cp -f "$f" "$APP_PATH/$tool"
-      chmod +x "$APP_PATH/$tool"
-      echo "  + $tool"
-    else
-      echo "  ! 未找到 $tool"
+    if [[ ! -f "$APP_PATH/$tool" ]]; then
+      f="$(find "$TF_TMP/x" -type f -name "$tool" | head -n1 || true)"
+      if [[ -n "$f" ]]; then
+        cp -f "$f" "$APP_PATH/$tool"
+        chmod +x "$APP_PATH/$tool"
+        echo "  + $tool (fallback)"
+      fi
     fi
   done
+  if [[ ! -f "$APP_PATH/libcrypto.3.dylib" ]]; then
+    f="$(find "$TF_TMP/x" -type f -name 'libcrypto*.dylib' | head -n1 || true)"
+    if [[ -n "$f" ]]; then
+      cp -f "$f" "$APP_PATH/$(basename "$f")"
+      # 若文件名不是 libcrypto.3.dylib，再复制一份标准名
+      cp -f "$f" "$APP_PATH/libcrypto.3.dylib"
+      echo "  + libcrypto (fallback)"
+    else
+      echo "错误: 缺少 libcrypto.3.dylib，ct_bypass 无法运行，目标注入后必闪"
+      exit 1
+    fi
+  fi
 else
-  echo "警告: 无法下载 TrollFools tipa，注入后可能因缺少 ct_bypass 闪退"
+  echo "错误: 无法下载 TrollFools tipa（注入签名必需）"
+  exit 1
 fi
 rm -rf "$TF_TMP"
 
@@ -143,6 +181,11 @@ fi
 ldid -S"$ENT_APP" "$APP_PATH/syinject" 2>/dev/null || ldid -S "$APP_PATH/syinject" || true
 for bin in ct_bypass ldid insert_dylib; do
   [[ -f "$APP_PATH/$bin" ]] && ldid -S"$ENT_APP" "$APP_PATH/$bin" 2>/dev/null || true
+done
+# openssl 依赖保持 TrollFools 原签名即可；若无签名再补空签
+for d in "$APP_PATH"/libcrypto*.dylib "$APP_PATH"/libssl*.dylib; do
+  [[ -f "$d" ]] || continue
+  ldid -S "$d" 2>/dev/null || true
 done
 [[ -f "$APP_PATH/ApolloNetService.dylib" ]] && ldid -S "$APP_PATH/ApolloNetService.dylib" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true

@@ -76,8 +76,16 @@ enum BuiltinInjector {
         let destDylib = app.bundleURL
             .appendingPathComponent("Frameworks/\(dylibFileName)", isDirectory: false)
 
-        // CoreTrust：改完 LC 必须伪签 + ct_bypass，否则有注入保护的目标会直接闪退
-        try coreTrustRepair(macho: machoPath, dylib: destDylib.path, teamID: app.teamID)
+        // CoreTrust：改完 LC 必须伪签 + ct_bypass，否则目标必闪
+        do {
+            try coreTrustRepair(macho: machoPath, dylib: destDylib.path, teamID: app.teamID)
+        } catch {
+            // 签名失败则回滚，避免留下半残注入让 A 一直闪退
+            _ = SpawnUtil.rootRun(helper.path, args: [
+                "eject", "--app", app.bundleURL.path, "--name", dylibFileName
+            ])
+            throw error
+        }
     }
 
     static func eject(from app: AppEntry) throws {
@@ -102,12 +110,19 @@ enum BuiltinInjector {
     private static func coreTrustRepair(macho: String, dylib: String, teamID: String) throws {
         let team = teamID.isEmpty ? "0000000000" : teamID
         guard let ldid = toolURL("ldid"), let ctb = toolURL("ct_bypass") else {
-            // 没有工具时仍允许注入，但提示可能闪退
-            return
+            throw InjectError.failed("缺少 ldid/ct_bypass，无法完成签名（注入后会闪退）")
+        }
+        // ct_bypass 依赖同目录 libcrypto.3.dylib
+        let crypto = Bundle.main.bundleURL.appendingPathComponent("libcrypto.3.dylib")
+        if !FileManager.default.fileExists(atPath: crypto.path) {
+            throw InjectError.failed("缺少 libcrypto.3.dylib，请重新打包 tipa")
         }
 
         // dylib：ldid -S + ct_bypass
-        _ = SpawnUtil.rootRun(ldid.path, args: ["-S", dylib])
+        let s1 = SpawnUtil.rootRun(ldid.path, args: ["-S", dylib])
+        if s1.code != 0 {
+            throw InjectError.failed("dylib ldid 失败：\(s1.err.isEmpty ? s1.out : s1.err)")
+        }
         var r = SpawnUtil.rootRun(ctb.path, args: ["-r", "-i", dylib, "-t", team])
         if r.code != 0 {
             throw InjectError.failed("dylib CoreTrust 处理失败：\(r.err.isEmpty ? r.out : r.err)")
@@ -115,7 +130,6 @@ enum BuiltinInjector {
 
         // 被改写的宿主 Mach-O
         if FileManager.default.fileExists(atPath: macho), !macho.hasSuffix("Frameworks") {
-            // 尽量保留原 entitlements
             let ent = SpawnUtil.rootRun(ldid.path, args: ["-e", macho])
             if ent.code == 0, !ent.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let tmp = NSTemporaryDirectory() + "sy_\(UUID().uuidString).xml"
@@ -123,13 +137,16 @@ enum BuiltinInjector {
                 _ = SpawnUtil.rootRun(ldid.path, args: ["-S\(tmp)", macho])
                 try? FileManager.default.removeItem(atPath: tmp)
             } else {
-                _ = SpawnUtil.rootRun(ldid.path, args: ["-S", macho])
+                let s2 = SpawnUtil.rootRun(ldid.path, args: ["-S", macho])
+                if s2.code != 0 {
+                    throw InjectError.failed("宿主 ldid 失败：\(s2.err.isEmpty ? s2.out : s2.err)")
+                }
             }
             r = SpawnUtil.rootRun(ctb.path, args: ["-r", "-i", macho, "-t", team])
             if r.code != 0 {
                 throw InjectError.failed("宿主 CoreTrust 处理失败：\(r.err.isEmpty ? r.out : r.err)")
             }
-            _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["33:33", macho])
+            _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["-R", "33:33", macho])
         }
         _ = SpawnUtil.rootRun("/usr/sbin/chown", args: ["33:33", dylib])
     }
