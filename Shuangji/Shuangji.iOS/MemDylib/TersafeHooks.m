@@ -4,13 +4,32 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach-o/dyld.h>
-#import <mach-o/getsect.h>
-#import <libkern/OSCacheControl.h>
 #import <sys/mman.h>
 #import <unistd.h>
 #import <string.h>
 #import "TersafeThreadChaos.h"
 #import "fishhook.h"
+
+/* 不用 sys_icache_invalidate / __builtin___clear_cache（部分 SDK 链不上 ___clear_cache） */
+static void sy_flush_icache(void *addr, size_t len) {
+#if defined(__aarch64__)
+    /* 指令流同步：改完代码后让取指看到新指令 */
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    uintptr_t p = (uintptr_t)addr & ~((uintptr_t)63);
+    uintptr_t end = (uintptr_t)addr + len;
+    for (; p < end; p += 64) {
+        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    }
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    p = (uintptr_t)addr & ~((uintptr_t)63);
+    for (; p < end; p += 64) {
+        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    }
+    __asm__ __volatile__("dsb ish\n\tisb" ::: "memory");
+#else
+    (void)addr; (void)len;
+#endif
+}
 
 /*
  * 稳定优先：只补丁 tersafe 公开导出 get_report*（已验证可拦上报）。
@@ -47,7 +66,7 @@ static int sy_patch_ret0(void *fn) {
     uint32_t code[2] = { 0xD2800000u, 0xD65F03C0u }; /* MOV X0,#0 ; RET */
     if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
     memcpy(fn, code, sizeof(code));
-    sys_icache_invalidate(fn, sizeof(code));
+    sy_flush_icache(fn, sizeof(code));
     sy_make_rx(fn, sizeof(code));
     return 0;
 }
@@ -57,7 +76,7 @@ static int sy_patch_ret(void *fn) {
     uint32_t code = 0xD65F03C0u;
     if (sy_make_rwx(fn, sizeof(code)) != 0) return -2;
     memcpy(fn, &code, sizeof(code));
-    sys_icache_invalidate(fn, sizeof(code));
+    sy_flush_icache(fn, sizeof(code));
     sy_make_rx(fn, sizeof(code));
     return 0;
 }

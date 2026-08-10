@@ -92,6 +92,7 @@ targets:
           - Foundation
           - "-framework"
           - UIKit
+          - "-lobjc"
           - "-lpthread"
 
 schemes:

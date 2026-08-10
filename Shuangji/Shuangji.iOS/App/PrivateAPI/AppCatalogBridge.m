@@ -98,3 +98,16 @@ NSArray<NSDictionary *> *SYFetchInstalledApplications(void) {
 
     return byID.allValues ?: @[];
 }
+
+BOOL SYOpenApplicationWithBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
+    if (!wsCls) return NO;
+    SEL defSel = @selector(defaultWorkspace);
+    if (![wsCls respondsToSelector:defSel]) return NO;
+    id ws = ((id (*)(id, SEL))objc_msgSend)(wsCls, defSel);
+    if (!ws) return NO;
+    SEL openSel = @selector(openApplicationWithBundleID:);
+    if (![ws respondsToSelector:openSel]) return NO;
+    return ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, openSel, bundleID);
+}
