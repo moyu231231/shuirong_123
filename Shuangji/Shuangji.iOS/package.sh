@@ -43,12 +43,14 @@ if [[ -f "$PBX" ]]; then
 fi
 
 echo "==> [3/6] 编译 App + dylib + Tunnel"
+mkdir -p "$ROOT/Resources"
 rm -rf "$DERIVED"
 xcodebuild \
   -project Shuiyong.xcodeproj \
   -scheme Shuiyong \
   -configuration Release \
   -sdk "$SDK" \
+  -destination 'generic/platform=iOS' \
   -derivedDataPath "$DERIVED" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \

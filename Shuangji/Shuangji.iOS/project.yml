@@ -26,10 +26,6 @@ targets:
     sources:
       - path: App
       - path: Shared
-      - path: Resources
-        type: folder
-        buildPhase: resources
-        optional: true
     settings:
       base:
         INFOPLIST_GENERATION_MODE: Generated
