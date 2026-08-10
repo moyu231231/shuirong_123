@@ -12,11 +12,15 @@
 #include <stdint.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <mach/machine.h>
+
+/* iOS 有 libproc，SDK 头未必暴露 */
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 
 static int write_all(const char *path, const uint8_t *buf, size_t n) {
     FILE *f = fopen(path, "wb");
@@ -441,9 +445,38 @@ static void chown_installd(const char *path) {
     chown(path, 33, 33);
 }
 
+/* 按路径子串找 PID（动态注入用）。stdout 只打一个 pid */
+static int find_pid_contains(const char *needle) {
+    if (!needle || !needle[0]) return -1;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) return -1;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(len);
+    if (!procs) return -1;
+    if (sysctl(mib, 4, procs, &len, NULL, 0) != 0) {
+        free(procs);
+        return -1;
+    }
+    int n = (int)(len / sizeof(struct kinfo_proc));
+    int found = -1;
+    char pathbuf[1024];
+    for (int i = 0; i < n; i++) {
+        int pid = procs[i].kp_proc.p_pid;
+        if (pid <= 1) continue;
+        memset(pathbuf, 0, sizeof(pathbuf));
+        if (proc_pidpath(pid, pathbuf, sizeof(pathbuf)) <= 0) continue;
+        if (strstr(pathbuf, needle)) {
+            found = pid;
+            break;
+        }
+    }
+    free(procs);
+    return found;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject mkdir|cp|rm|chown33|exists|enc|find|deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chown33|exists|enc|find|pid|cat|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
@@ -454,6 +487,7 @@ int main(int argc, char **argv) {
     const char *exe = NULL;
     const char *dylib = "@rpath/sy_ports.dylib";
     const char *name = "sy_ports.dylib";
+    const char *contains = NULL;
     int weak = 1;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--app") && i + 1 < argc) app = argv[++i];
@@ -463,6 +497,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--dylib") && i + 1 < argc) dylib = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
+        else if (!strcmp(argv[i], "--contains") && i + 1 < argc) contains = argv[++i];
         else if (!strcmp(argv[i], "--weak")) weak = 1;
         else if (!strcmp(argv[i], "--strong")) weak = 0;
         else if (!strcmp(argv[i], "--rpath") && i + 1 < argc) i++;
@@ -494,6 +529,20 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "exists")) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }
         return access(path, F_OK) == 0 ? 0 : 1;
+    }
+    /* 动态注入：按路径子串查进程 PID */
+    if (!strcmp(mode, "pid")) {
+        const char *key = contains;
+        if (!key && app) key = app;
+        if (!key && path) key = path;
+        if (!key) { fprintf(stderr, "need --contains <substr> or --app <pathfrag>\n"); return 1; }
+        int pid = find_pid_contains(key);
+        if (pid <= 0) {
+            fprintf(stderr, "not found\n");
+            return 1;
+        }
+        fprintf(stdout, "%d\n", pid);
+        return 0;
     }
     /* 打印文件内容到 stdout（给 App 查补丁状态用） */
     if (!strcmp(mode, "cat")) {

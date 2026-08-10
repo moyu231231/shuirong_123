@@ -10,12 +10,13 @@ struct InjectHomeView: View {
     @State private var alertMsg = ""
     @State private var showAlert = false
     @State private var scope = 0 // 0全部 1用户 2已注入
-    @State private var pendingLaunchID: String?
 
     var filtered: [AppEntry] {
         apps.filter { app in
             if scope == 1 && !app.isUser { return false }
-            if scope == 2 && !app.isInjected { return false }
+            if scope == 2 && !(app.isInjected || BuiltinInjector.isRuntimeMarked(app.bundleID)) {
+                return false
+            }
             if filter.isEmpty { return true }
             return app.name.localizedCaseInsensitiveContains(filter)
                 || app.bundleID.localizedCaseInsensitiveContains(filter)
@@ -25,6 +26,13 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
+                Text("默认动态注入：不改游戏文件，进游戏后再挂库（防启动扫盘拉闸）")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+
                 Picker("", selection: $scope) {
                     Text("全部").tag(0)
                     Text("用户").tag(1)
@@ -39,18 +47,16 @@ struct InjectHomeView: View {
                         Spacer()
                         Text("没有读到已安装应用")
                             .font(.headline)
-                        Text("请用 TrollStore 重新安装本 tipa（旧包权限不足）。\n装好后点右上角「刷新」。")
+                        Text("请用 TrollStore 重新安装本 tipa。")
                             .font(.footnote)
                             .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
                         ForEach(filtered) { app in
-                            HStack(spacing: 12) {
+                            HStack(spacing: 10) {
                                 if let img = app.icon {
                                     Image(uiImage: img)
                                         .resizable()
@@ -68,7 +74,11 @@ struct InjectHomeView: View {
                                         .foregroundColor(.secondary)
                                         .lineLimit(1)
                                     if app.isInjected {
-                                        Text("已注入")
+                                        Text("磁盘注入(易被扫)")
+                                            .font(.caption2)
+                                            .foregroundColor(.orange)
+                                    } else if BuiltinInjector.isRuntimeMarked(app.bundleID) {
+                                        Text("曾动态注入")
                                             .font(.caption2)
                                             .foregroundColor(.green)
                                     }
@@ -76,14 +86,19 @@ struct InjectHomeView: View {
                                 Spacer()
                                 if busyID == app.bundleID {
                                     ProgressView()
-                                } else if app.isInjected {
-                                    Button("移除") { eject(app) }
-                                        .buttonStyle(.bordered)
-                                    Button("打开") { launch(app.bundleID) }
-                                        .buttonStyle(.borderedProminent)
                                 } else {
-                                    Button("注入") { inject(app) }
-                                        .buttonStyle(.borderedProminent)
+                                    Menu {
+                                        Button("动态注入（推荐）") { runtimeInject(app) }
+                                        Button("打开游戏") { launch(app.bundleID) }
+                                        if app.isInjected {
+                                            Button("清磁盘残留", role: .destructive) { eject(app) }
+                                        }
+                                        Button("磁盘注入（不推荐）", role: .destructive) { diskInject(app) }
+                                    } label: {
+                                        Text("操作")
+                                            .font(.subheadline.weight(.semibold))
+                                    }
+                                    .buttonStyle(.borderedProminent)
                                 }
                             }
                             .padding(.vertical, 2)
@@ -110,19 +125,11 @@ struct InjectHomeView: View {
             }
             .onAppear { reload() }
             .alert(alertTitle, isPresented: $showAlert) {
-                Button("好", role: .cancel) {
-                    if let id = pendingLaunchID {
-                        pendingLaunchID = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            launch(id)
-                        }
-                    }
-                }
+                Button("好", role: .cancel) {}
             } message: {
                 Text(alertMsg)
             }
         }
-        // 分屏靠 Info.plist UIRequiresFullScreen=NO；导航用栈式避免宽屏空白
         .navigationViewStyle(StackNavigationViewStyle())
     }
 
@@ -138,39 +145,50 @@ struct InjectHomeView: View {
         banner = ok ? "正在打开…" : "打开失败，请手动点图标"
     }
 
-    private func inject(_ app: AppEntry) {
+    private func runtimeInject(_ app: AppEntry) {
         busyID = app.bundleID
-        banner = nil
-        pendingLaunchID = nil
+        banner = "动态注入中：启动游戏 → 等待 → opainject…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try BuiltinInjector.inject(into: app)
-                // 注入前 kill 过，稍等系统释放再拉起
-                Thread.sleep(forTimeInterval: 0.8)
+                try BuiltinInjector.runtimeInject(into: app, settleSeconds: 28)
                 DispatchQueue.main.async {
                     busyID = nil
-                    banner = "注入完成，即将打开游戏"
-                    alertTitle = "注入成功"
-                    let tgt = BuiltinInjector.lastTargetPath
-                    let short = tgt.isEmpty ? "(未知)" : (tgt as NSString).lastPathComponent
-                    alertMsg = "已写入 \(app.name)\n目标: \(short)\ndylib: sy_ports.dylib\n\n已恢复悬浮窗；已去掉会闪的机器码补丁，改用 fishhook。\n进游戏数秒后应出提示。\n点「好」后打开。"
-                    pendingLaunchID = app.bundleID
+                    banner = "动态注入完成 pid=\(BuiltinInjector.lastRuntimePID)"
+                    alertTitle = "动态注入成功"
+                    alertMsg = "未改游戏磁盘。\npid=\(BuiltinInjector.lastRuntimePID)\n约数秒后应出悬浮窗。\n退游戏后需重新动态注入。\n上报仍建议开链路 4013。"
                     showAlert = true
                     reload()
-                    // 若用户不点弹窗，仍自动打开
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        if pendingLaunchID == app.bundleID {
-                            pendingLaunchID = nil
-                            showAlert = false
-                            launch(app.bundleID)
-                        }
-                    }
                 }
             } catch {
                 DispatchQueue.main.async {
                     busyID = nil
                     banner = error.localizedDescription
-                    alertTitle = "注入失败"
+                    alertTitle = "动态注入失败"
+                    alertMsg = error.localizedDescription
+                    showAlert = true
+                }
+            }
+        }
+    }
+
+    private func diskInject(_ app: AppEntry) {
+        busyID = app.bundleID
+        banner = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try BuiltinInjector.inject(into: app)
+                DispatchQueue.main.async {
+                    busyID = nil
+                    banner = "磁盘注入完成（易被扫）"
+                    alertTitle = "磁盘注入完成"
+                    alertMsg = "已写入 LC，ACE 可能启动即拉闸。\n建议改用「动态注入」。"
+                    showAlert = true
+                    reload()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    busyID = nil
+                    alertTitle = "失败"
                     alertMsg = error.localizedDescription
                     showAlert = true
                 }
@@ -185,7 +203,7 @@ struct InjectHomeView: View {
                 try BuiltinInjector.eject(from: app)
                 DispatchQueue.main.async {
                     busyID = nil
-                    banner = "已移除"
+                    banner = "已清磁盘残留"
                     reload()
                 }
             } catch {

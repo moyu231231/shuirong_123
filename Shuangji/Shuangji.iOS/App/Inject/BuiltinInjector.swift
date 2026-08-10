@@ -1,15 +1,17 @@
 import Foundation
 
-/// TrollFools 同款：宿主原始备份 `.sy_bak` 常驻。
-/// dylib 必须用不会与游戏原库撞名的文件名（曾用 ApolloNetService 会盖掉腾讯库 → 秒闪）。
+/// 默认：动态注入（不改游戏磁盘 Mach-O，opainject 进运行中进程）。
+/// 磁盘 insert_dylib 会被 ACE 扫 LC/文件 → 一进游戏就拉闸。
 enum BuiltinInjector {
 
     /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名
     static let dylibFileName = "sy_ports.dylib"
     static let markerLoadName = "@rpath/sy_ports.dylib"
+    /// dylib 放自家缓存，不进游戏 Frameworks
+    static let runtimeCacheDir = "/var/mobile/Library/Caches/com.shuiyong.ports"
     private static let buildProductNames = ["sy_ports.dylib", "ShuiyongMem.dylib", "ApolloNetService.dylib"]
-    /// 仅清理我们自己的文件名；绝不删 ApolloNetService（可能是游戏正版库）
     private static let ourExtraNames = ["ShuiyongMem.dylib"]
+    private static let runtimeMarkKey = "sy_runtime_injected_bids"
 
     enum InjectError: LocalizedError {
         case noDylib, noTool(String), failed(String)
@@ -41,9 +43,111 @@ enum BuiltinInjector {
         return FileManager.default.fileExists(atPath: dest.path)
     }
 
-    /// 最近一次注入目标路径（成功后可读）
+    /// 最近一次磁盘注入目标 / 动态注入结果说明
     private(set) static var lastTargetPath: String = ""
+    private(set) static var lastRuntimePID: Int = 0
 
+    static func isRuntimeMarked(_ bundleID: String) -> Bool {
+        let s = UserDefaults.standard.stringArray(forKey: runtimeMarkKey) ?? []
+        return s.contains(bundleID)
+    }
+
+    private static func setRuntimeMarked(_ bundleID: String, on: Bool) {
+        var s = Set(UserDefaults.standard.stringArray(forKey: runtimeMarkKey) ?? [])
+        if on { s.insert(bundleID) } else { s.remove(bundleID) }
+        UserDefaults.standard.set(Array(s), forKey: runtimeMarkKey)
+    }
+
+    /// 动态注入：游戏干净启动 → 等进程 → opainject dlopen（不写 LC_LOAD）
+    static func runtimeInject(into app: AppEntry, settleSeconds: Int = 28) throws {
+        guard let src = bundledDylibURL else { throw InjectError.noDylib }
+        guard let ldid = toolURL("ldid") else { throw InjectError.noTool("ldid") }
+        guard let ctb = toolURL("ct_bypass") else { throw InjectError.noTool("ct_bypass") }
+        guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
+        guard let opa = toolURL("opainject") else {
+            throw InjectError.noTool("opainject（请重装新 tipa）")
+        }
+        let crypto = Bundle.main.bundleURL.appendingPathComponent("libcrypto.3.dylib")
+        guard FileManager.default.fileExists(atPath: crypto.path) else {
+            throw InjectError.failed("缺少 libcrypto.3.dylib")
+        }
+
+        // 若以前磁盘注入过，先还原，避免启动就被扫到 LC
+        if isInjected(bundleURL: app.bundleURL) {
+            try eject(from: app)
+        }
+
+        let team = app.teamID.isEmpty ? "0000000000" : app.teamID
+        let destDir = runtimeCacheDir
+        let dest = "\(destDir)/\(dylibFileName)"
+
+        var r = rootFs(sy, "mkdir", ["--path", destDir])
+        if r.code != 0 {
+            throw InjectError.failed("创建缓存目录失败：\(r.detail)")
+        }
+        _ = rootFs(sy, "rm", ["--path", dest])
+        r = rootFs(sy, "cp", ["--src", src.path, "--dst", dest])
+        if r.code != 0, !copyWithBundledCp(src: src.path, dst: dest) {
+            throw InjectError.failed("复制 dylib 失败：\(r.detail)")
+        }
+        if let intn = toolURL("install_name_tool") {
+            _ = SpawnUtil.rootRun(intn.path, args: ["-id", "@rpath/\(dylibFileName)", dest])
+        }
+        try resign(ldid: ldid.path, ctb: ctb.path, path: dest, team: team, keepEnt: false)
+        _ = rootFs(sy, "chown33", ["--path", dest])
+
+        // 干净启动游戏
+        terminate(app: app)
+        Thread.sleep(forTimeInterval: 0.6)
+        if !SYOpenApplicationWithBundleID(app.bundleID) {
+            throw InjectError.failed("无法打开游戏，请手动打开后再点动态注入")
+        }
+
+        // 等进程出现
+        let needles: [String] = {
+            var a: [String] = []
+            let p = app.bundleURL.path
+            if !p.isEmpty { a.append(p) }
+            a.append(app.bundleURL.lastPathComponent) // Xxx.app
+            if let exe = locateExecutable(in: app.bundleURL) {
+                a.append(exe.lastPathComponent)
+            }
+            return a
+        }()
+
+        var pid = 0
+        for _ in 0..<90 {
+            Thread.sleep(forTimeInterval: 1)
+            for n in needles {
+                let pr = SpawnUtil.rootRun(sy.path, args: ["pid", "--contains", n])
+                if pr.code == 0,
+                   let v = Int(pr.out.trimmingCharacters(in: .whitespacesAndNewlines)), v > 1 {
+                    pid = v
+                    break
+                }
+            }
+            if pid > 1 { break }
+        }
+        if pid <= 1 {
+            throw InjectError.failed("未找到游戏进程。请先手动打开游戏，再点「动态注入」。")
+        }
+
+        // 等 ACE 初始扫盘（磁盘无 LC）过完再挂
+        let wait = max(5, settleSeconds)
+        Thread.sleep(forTimeInterval: TimeInterval(wait))
+
+        let inj = SpawnUtil.rootRun(opa.path, args: ["\(pid)", dest])
+        if inj.code != 0 {
+            let msg = (inj.err.isEmpty ? inj.out : inj.err).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw InjectError.failed("opainject 失败(pid=\(pid))：\(msg.isEmpty ? "exit \(inj.code)" : msg)")
+        }
+
+        lastRuntimePID = pid
+        lastTargetPath = "runtime pid=\(pid) \(dest)"
+        setRuntimeMarked(app.bundleID, on: true)
+    }
+
+    /// 旧：磁盘 insert_dylib（易被扫，仅作兼容）
     static func inject(into app: AppEntry) throws {
         guard let src = bundledDylibURL else { throw InjectError.noDylib }
         guard let insert = toolURL("insert_dylib") else { throw InjectError.noTool("insert_dylib") }
@@ -226,6 +330,7 @@ enum BuiltinInjector {
             _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent(n).path])
         }
         _ = rootFs(sy, "rm", ["--path", mark.path])
+        setRuntimeMarked(app.bundleID, on: false)
         // 注意：不删除 ApolloNetService.dylib。若以前盖过正版，请重装游戏恢复。
     }
 

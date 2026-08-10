@@ -121,7 +121,7 @@ if curl -fL --retry 3 -o "$TF_TMP/tf.tipa" "$TF_URL"; then
     echo "TrollFools 工具目录: $CTB_DIR"
     # 拷贝可执行工具
     # iOS 15 需要 cp-15 / mkdir-15 等；16+ 用无后缀名
-    for tool in ct_bypass ldid insert_dylib optool install_name_tool \
+    for tool in ct_bypass ldid insert_dylib optool install_name_tool opainject \
                 chown cp cp-15 mkdir mkdir-15 mv mv-15 rm rm-15; do
       if [[ -f "$CTB_DIR/$tool" ]]; then
         cp -f "$CTB_DIR/$tool" "$APP_PATH/$tool"
@@ -170,6 +170,18 @@ else
 fi
 rm -rf "$TF_TMP"
 
+# 动态注入：opainject（进程内 dlopen，不改游戏 Mach-O）
+if [[ ! -f "$APP_PATH/opainject" ]]; then
+  echo "拉取 opainject..."
+  curl -fL --retry 3 -o "$APP_PATH/opainject" \
+    "https://github.com/opa334/opainject/releases/download/1.0.6/opainject" \
+    || echo "警告: opainject 下载失败，动态注入不可用"
+  if [[ -f "$APP_PATH/opainject" ]]; then
+    chmod +x "$APP_PATH/opainject"
+    echo "  + opainject"
+  fi
+fi
+
 echo "==> [5/6] ldid 伪签（必须带 App.entitlements，否则注入页读不到已装应用）"
 ENT_APP="$ROOT/entitlements/App.entitlements"
 ENT_TUN="$ROOT/entitlements/Tunnel.entitlements"
@@ -200,6 +212,7 @@ for d in "$APP_PATH"/libcrypto*.dylib "$APP_PATH"/libssl*.dylib; do
 done
 [[ -f "$APP_PATH/sy_ports.dylib" ]] && ldid -S "$APP_PATH/sy_ports.dylib" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
+[[ -f "$APP_PATH/opainject" ]] && ldid -S "$APP_PATH/opainject" || true
 # 扩展
 EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"
 if [[ -n "$EXT" ]]; then
