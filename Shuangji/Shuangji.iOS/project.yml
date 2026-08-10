@@ -88,6 +88,10 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CLANG_ENABLE_MODULES: YES
         OTHER_LDFLAGS:
+          - "-framework"
+          - Foundation
+          - "-framework"
+          - UIKit
           - "-lobjc"
           - "-lpthread"
 

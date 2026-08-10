@@ -153,7 +153,7 @@ struct InjectHomeView: View {
                     alertTitle = "注入成功"
                     let tgt = BuiltinInjector.lastTargetPath
                     let short = tgt.isEmpty ? "(未知)" : (tgt as NSString).lastPathComponent
-                    alertMsg = "已写入 \(app.name)\n目标: \(short)\ndylib: sy_ports.dylib（空载）\n\n若以前注入闪退过：请先「移除」并重装游戏（旧版可能盖坏了 ApolloNetService）。\n点「好」后打开。"
+                    alertMsg = "已写入 \(app.name)\n目标: \(short)\ndylib: sy_ports.dylib\n\n进游戏约数秒后顶部应出现「报告钩子已生效」。\n点「好」后打开。"
                     pendingLaunchID = app.bundleID
                     showAlert = true
                     reload()
