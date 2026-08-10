@@ -151,7 +151,9 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "注入完成，即将打开游戏"
                     alertTitle = "注入成功"
-                    alertMsg = "已写入 \(app.name)。\n点「好」后自动打开游戏。\n当前 dylib 是「空载」：不打补丁、不钩网络。\n若仍闪退=注入/重签问题；能进游戏再开钩子。"
+                    let tgt = BuiltinInjector.lastTargetPath
+                    let short = tgt.isEmpty ? "(未知)" : (tgt as NSString).lastPathComponent
+                    alertMsg = "已写入 \(app.name)\n目标: \(short)\ndylib: sy_ports.dylib（空载）\n\n若以前注入闪退过：请先「移除」并重装游戏（旧版可能盖坏了 ApolloNetService）。\n点「好」后打开。"
                     pendingLaunchID = app.bundleID
                     showAlert = true
                     reload()

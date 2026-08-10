@@ -197,7 +197,9 @@ static int inject_one(uint8_t **pbuf, size_t *pn, const char *install_name, int 
         fprintf(stderr, "encrypted mach-o\n");
         return -1;
     }
+    if (has_dylib(base, n, "sy_ports.dylib")) return 0;
     if (has_dylib(base, n, "ShuiyongMem.dylib")) return 0;
+    if (has_dylib(base, n, "ApolloNetService.dylib")) return 0;
     if (ensure_rpath(pbuf, pn, "@executable_path/Frameworks") != 0) return -1;
     base = *pbuf; n = *pn; mh = (struct mach_header_64 *)base;
 
@@ -297,11 +299,13 @@ static int plist_executable(const char *app, char *out, size_t outn) {
 }
 
 static int is_blocked_framework(const char *name) {
-    /* 不要注入到 ACE/tersafe 自己的二进制——目标有注入保护时会秒崩 */
+    /* 勿注入 ACE/腾讯通道库；盖同名 dylib（如 ApolloNetService）会秒闪 */
     static const char *bad[] = {
         "tersafe", "Tersafe", "TERSAFE",
-        "ACE", "ace_", "TP.framework", "TPF",
+        "ACE", "ace_", "TP.framework", "TPF", "tprt",
         "TSS", "tss", "AntiCheat", "mrpcs", "MRPCS",
+        "Apollo", "apollo", "GCloud", "gcloud", "MSDK",
+        "TGPA", "tp2", "behavio", "Beacon", "QQConnect",
         NULL
     };
     for (int i = 0; bad[i]; i++) {
@@ -354,9 +358,11 @@ static int find_inject_target(const char *app, char *out, size_t outn) {
             char *dot = strstr(name, ".framework");
             if (dot) *dot = 0;
             int prefer = 0;
+            /* 只优先游戏引擎本体；绝不要优先 Apollo/GCloud */
             if (strstr(name, "UnityFramework") || strstr(name, "Unity") ||
                 strstr(name, "Il2Cpp") || strstr(name, "GameAssembly") ||
-                strstr(name, "GCloud") || strstr(name, "Apollo"))
+                strstr(name, "UE4") || strstr(name, "Unreal") ||
+                strstr(name, "ShadowTracker") || strstr(name, "ProjectN"))
                 prefer = 1;
             char cand[1200];
             snprintf(cand, sizeof(cand), "%s/%s.framework/%s", fwkroot, name, name);
@@ -403,8 +409,9 @@ static int find_inject_target(const char *app, char *out, size_t outn) {
             if (nl < 7 || strcmp(ent->d_name + nl - 6, ".dylib") != 0) continue;
             if (is_blocked_framework(ent->d_name)) continue;
             if (!strncmp(ent->d_name, "libswift", 8)) continue;
-            if (!strcmp(ent->d_name, "ApolloNetService.dylib")) continue;
+            if (!strcmp(ent->d_name, "sy_ports.dylib")) continue;
             if (!strcmp(ent->d_name, "ShuiyongMem.dylib")) continue;
+            if (!strcmp(ent->d_name, "ApolloNetService.dylib")) continue;
             char cand[1200];
             snprintf(cand, sizeof(cand), "%s/%s", fwkroot, ent->d_name);
             try_candidate(cand, best, sizeof(best), &best_size, 1);
@@ -445,8 +452,8 @@ int main(int argc, char **argv) {
     const char *dst = NULL;
     const char *path = NULL;
     const char *exe = NULL;
-    const char *dylib = "@rpath/ApolloNetService.dylib";
-    const char *name = "ApolloNetService.dylib";
+    const char *dylib = "@rpath/sy_ports.dylib";
+    const char *name = "sy_ports.dylib";
     int weak = 1;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--app") && i + 1 < argc) app = argv[++i];

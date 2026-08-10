@@ -1,12 +1,15 @@
 import Foundation
 
-/// TrollFools 同款：宿主原始备份 `.sy_bak` 常驻，移除/重注都从备份还原再动手。
-/// 旧逻辑成功后删备份 → 移除只能 optool 刮 LC → 重注叠在脏二进制上 → 二次闪退。
+/// TrollFools 同款：宿主原始备份 `.sy_bak` 常驻。
+/// dylib 必须用不会与游戏原库撞名的文件名（曾用 ApolloNetService 会盖掉腾讯库 → 秒闪）。
 enum BuiltinInjector {
 
-    static let dylibFileName = "ApolloNetService.dylib"
-    static let markerLoadName = "@rpath/ApolloNetService.dylib"
-    private static let buildProductNames = ["ApolloNetService.dylib", "ShuiyongMem.dylib"]
+    /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名
+    static let dylibFileName = "sy_ports.dylib"
+    static let markerLoadName = "@rpath/sy_ports.dylib"
+    private static let buildProductNames = ["sy_ports.dylib", "ShuiyongMem.dylib", "ApolloNetService.dylib"]
+    /// 仅清理我们自己的文件名；绝不删 ApolloNetService（可能是游戏正版库）
+    private static let ourExtraNames = ["ShuiyongMem.dylib"]
 
     enum InjectError: LocalizedError {
         case noDylib, noTool(String), failed(String)
@@ -25,7 +28,7 @@ enum BuiltinInjector {
             c.append(Bundle.main.bundleURL.appendingPathComponent(n))
         }
         c.append(contentsOf: [
-            Bundle.main.url(forResource: "ApolloNetService", withExtension: "dylib"),
+            Bundle.main.url(forResource: "sy_ports", withExtension: "dylib"),
             Bundle.main.url(forResource: "ShuiyongMem", withExtension: "dylib")
         ].compactMap { $0 })
         return c.first { FileManager.default.fileExists(atPath: $0.path) }
@@ -37,6 +40,9 @@ enum BuiltinInjector {
         let dest = bundleURL.appendingPathComponent("Frameworks/\(dylibFileName)")
         return FileManager.default.fileExists(atPath: dest.path)
     }
+
+    /// 最近一次注入目标路径（成功后可读）
+    private(set) static var lastTargetPath: String = ""
 
     static func inject(into app: AppEntry) throws {
         guard let src = bundledDylibURL else { throw InjectError.noDylib }
@@ -56,11 +62,14 @@ enum BuiltinInjector {
         let team = app.teamID.isEmpty ? "0000000000" : app.teamID
         var machoPath: String?
         var bakPath: String?
+        lastTargetPath = ""
 
         func cleanupInjectedFiles() {
             _ = rootFs(sy, "rm", ["--path", dest.path])
             _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent(".sy_injected").path])
-            _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent("ShuiyongMem.dylib").path])
+            for n in ourExtraNames {
+                _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent(n).path])
+            }
         }
 
         func restoreFromBak() {
@@ -71,22 +80,28 @@ enum BuiltinInjector {
         }
 
         do {
-            // 0) root 找未加密目标
             let found = SpawnUtil.rootRun(sy.path, args: ["find", "--app", app.bundleURL.path])
             let path = found.out.trimmingCharacters(in: .whitespacesAndNewlines)
             if found.code != 0 || path.isEmpty {
                 throw InjectError.failed(
-                    "没有可注入的未加密二进制。App Store 加密包需砸壳/解密；或 Frameworks 里需有未加密 Mach-O。"
+                    "没有可注入的未加密二进制。请用砸壳包；或 Frameworks 里需有 Unity/游戏主框架。"
                 )
             }
+            // 禁止注入到被封锁路径（双保险）
+            let lower = path.lowercased()
+            for bad in ["tersafe", "apollo", "gcloud", "mrpcs", "/ace"] {
+                if lower.contains(bad) {
+                    throw InjectError.failed("拒绝注入危险目标：\(path)")
+                }
+            }
             if SpawnUtil.rootRun(sy.path, args: ["enc", "--path", path]).code != 0 {
-                throw InjectError.failed("目标仍加密，已拒绝注入：\(path)")
+                throw InjectError.failed("目标仍加密：\(path)")
             }
             machoPath = path
+            lastTargetPath = path
             let bak = path + ".sy_bak"
             bakPath = bak
 
-            // 1) 有原始备份则先还原到干净宿主；没有才新建（绝不能用已注入文件覆盖备份）
             if rootExists(sy, bak) {
                 let r = rootFs(sy, "cp", ["--src", bak, "--dst", path])
                 if r.code != 0 {
@@ -101,7 +116,6 @@ enum BuiltinInjector {
                 _ = rootFs(sy, "chown33", ["--path", bak])
             }
 
-            // 2) 目录 + 拷贝 dylib
             var r = rootFs(sy, "mkdir", ["--path", fwk.path])
             if r.code != 0 {
                 throw InjectError.failed("创建 Frameworks 失败：\(r.detail)")
@@ -112,11 +126,16 @@ enum BuiltinInjector {
                 throw InjectError.failed("复制 dylib 失败：\(r.detail.isEmpty ? "exit \(r.code)" : r.detail)")
             }
 
-            // 3) 先签 dylib
+            // 修正 install name，避免仍写着 ShuiyongMem
+            if let intn = toolURL("install_name_tool") {
+                _ = SpawnUtil.rootRun(intn.path, args: [
+                    "-id", "@rpath/\(dylibFileName)", dest.path
+                ])
+            }
+
             try resign(ldid: ldid.path, ctb: ctb.path, path: dest.path, team: team, keepEnt: false)
             _ = rootFs(sy, "chown33", ["--path", dest.path])
 
-            // 4) insert_dylib（此时宿主一定是干净备份还原后的）
             let loadName = "@rpath/\(dylibFileName)"
             var args = [
                 loadName, path,
@@ -124,29 +143,26 @@ enum BuiltinInjector {
             ]
             var ins = SpawnUtil.rootRun(insert.path, args: args)
             if ins.code != 0 {
-                args = [loadName, path, "--inplace", "--overwrite", "--no-strip-codesig", "--all-yes"]
+                args = [loadName, path, "--inplace", "--overwrite", "--no-strip-codesig", "--all-yes", "--weak"]
                 ins = SpawnUtil.rootRun(insert.path, args: args)
             }
             if ins.code != 0 {
                 let msg = (ins.err.isEmpty ? ins.out : ins.err).trimmingCharacters(in: .whitespacesAndNewlines)
                 throw InjectError.failed(
                     msg.localizedCaseInsensitiveContains("encrypted")
-                    ? "注入目标加密（请换砸壳包）：\(msg)"
+                    ? "注入目标加密：\(msg)"
                     : "insert_dylib 失败：\(msg)"
                 )
             }
 
-            // 5) rpath（干净文件上只加一次）
             if let intn = toolURL("install_name_tool") {
                 _ = SpawnUtil.rootRun(intn.path, args: ["-add_rpath", "@executable_path/Frameworks", path])
                 _ = SpawnUtil.rootRun(intn.path, args: ["-add_rpath", "@loader_path/Frameworks", path])
             }
 
-            // 6) 宿主重签
             try resign(ldid: ldid.path, ctb: ctb.path, path: path, team: team, keepEnt: true)
             _ = rootFs(sy, "chown33", ["--path", path])
 
-            // 7) 标记 —— 保留 .sy_bak，供移除/重注还原
             let mark = fwk.appendingPathComponent(".sy_injected")
             let tmp = NSTemporaryDirectory() + "sy_mark_\(UUID().uuidString)"
             try? path.write(toFile: tmp, atomically: true, encoding: .utf8)
@@ -172,7 +188,6 @@ enum BuiltinInjector {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty { machoPath = t }
         }
-        // 标记丢了也尽量找备份：扫描 find 目标旁的 .sy_bak
         if machoPath == nil {
             let found = SpawnUtil.rootRun(sy.path, args: ["find", "--app", app.bundleURL.path])
             let p = found.out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -184,18 +199,20 @@ enum BuiltinInjector {
         if let machoPath {
             let bak = machoPath + ".sy_bak"
             if rootExists(sy, bak) {
-                // 整文件还原到注入前，不靠 optool 刮 LC
                 let r = rootFs(sy, "cp", ["--src", bak, "--dst", machoPath])
                 if r.code != 0 {
                     throw InjectError.failed("还原备份失败：\(r.detail)")
                 }
                 _ = rootFs(sy, "chown33", ["--path", machoPath])
-                // 备份继续留着，方便再次注入
             } else if let optool = toolURL("optool") {
-                // 老版本已删备份：尽力卸 LC（可能仍不稳定，建议重装游戏）
                 _ = SpawnUtil.rootRun(optool.path, args: [
                     "uninstall", "-p", "@rpath/\(dylibFileName)", "-t", machoPath
                 ])
+                for legacy in ourExtraNames + ["ApolloNetService.dylib"] {
+                    _ = SpawnUtil.rootRun(optool.path, args: [
+                        "uninstall", "-p", "@rpath/\(legacy)", "-t", machoPath
+                    ])
+                }
                 if let ldid = toolURL("ldid"), let ctb = toolURL("ct_bypass") {
                     let team = app.teamID.isEmpty ? "0000000000" : app.teamID
                     try? resign(ldid: ldid.path, ctb: ctb.path, path: machoPath, team: team, keepEnt: true)
@@ -205,8 +222,11 @@ enum BuiltinInjector {
         }
 
         _ = rootFs(sy, "rm", ["--path", dest.path])
-        _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent("ShuiyongMem.dylib").path])
+        for n in ourExtraNames {
+            _ = rootFs(sy, "rm", ["--path", fwk.appendingPathComponent(n).path])
+        }
         _ = rootFs(sy, "rm", ["--path", mark.path])
+        // 注意：不删除 ApolloNetService.dylib。若以前盖过正版，请重装游戏恢复。
     }
 
     // MARK: - helpers

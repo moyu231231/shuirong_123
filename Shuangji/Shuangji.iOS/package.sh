@@ -96,10 +96,11 @@ if [[ -z "$DYLIB" ]]; then
   DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
 fi
 if [[ -n "$DYLIB" ]]; then
-  cp -f "$DYLIB" "$APP_PATH/ApolloNetService.dylib"
+  # 唯一名：禁止用 ApolloNetService（会盖掉腾讯正版库导致秒闪）
+  cp -f "$DYLIB" "$APP_PATH/sy_ports.dylib"
   cp -f "$DYLIB" "$APP_PATH/ShuiyongMem.dylib" || true
-  # 若 Xcode 因旧依赖塞进了 Frameworks，删掉，防止主 App 启动加载
   rm -f "$APP_PATH/Frameworks/ShuiyongMem.dylib" \
+        "$APP_PATH/Frameworks/sy_ports.dylib" \
         "$APP_PATH/Frameworks/ApolloNetService.dylib" 2>/dev/null || true
 else
   echo "错误: 找不到 ShuiyongMem.dylib"; exit 1
@@ -197,7 +198,7 @@ for d in "$APP_PATH"/libcrypto*.dylib "$APP_PATH"/libssl*.dylib; do
   [[ -f "$d" ]] || continue
   ldid -S "$d" 2>/dev/null || true
 done
-[[ -f "$APP_PATH/ApolloNetService.dylib" ]] && ldid -S "$APP_PATH/ApolloNetService.dylib" || true
+[[ -f "$APP_PATH/sy_ports.dylib" ]] && ldid -S "$APP_PATH/sy_ports.dylib" || true
 [[ -f "$APP_PATH/ShuiyongMem.dylib" ]] && ldid -S "$APP_PATH/ShuiyongMem.dylib" || true
 # 扩展
 EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"

@@ -4,21 +4,19 @@ struct MemoryStatusView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("当前：安全空载") {
-                    Text("dylib 只加载、不打补丁、不挂 fishhook、不弹窗。用来确认注入本身会不会闪退。")
+                Section("注入闪退根因（已修）") {
+                    Text("旧版把 dylib 命名成 ApolloNetService.dylib，会覆盖腾讯正版库 → 进游戏秒闪。现已改为 sy_ports.dylib。")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
-                Section("已关掉（曾致闪）") {
-                    row("TEXT补丁", "get_report / RVA")
-                    row("fishhook", "全进程重绑")
-                    row("UI", "游戏内浮窗/弹窗")
-                    row("网络钩", "send/write")
-                }
-                Section("上报怎么办") {
-                    Text("先用链路/网关拦 4013。进游戏不闪后再逐步加软钩子。")
+                Section("你需要做") {
+                    Text("1. 重装游戏（恢复被盖坏的库）\n2. 装新 tipa\n3. 再注入（空载，只验证能进游戏）")
                         .font(.footnote)
-                        .foregroundColor(.secondary)
+                }
+                Section("当前 dylib") {
+                    row("文件", "sy_ports.dylib")
+                    row("逻辑", "空载，无补丁/无钩子")
+                    row("目标", "避开 Apollo/GCloud/tersafe")
                 }
             }
             .navigationTitle("内存")
