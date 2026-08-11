@@ -5,6 +5,8 @@ struct RootTabView: View {
 
     var body: some View {
         TabView {
+            DeployHomeView()
+                .tabItem { Label("部署", systemImage: "shippingbox.and.arrow.backward") }
             InjectHomeView()
                 .tabItem { Label("注入", systemImage: "shippingbox") }
             LinkSettingsView(onLogout: onLogout)

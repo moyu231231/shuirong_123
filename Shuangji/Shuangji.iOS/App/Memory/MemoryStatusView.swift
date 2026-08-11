@@ -19,7 +19,7 @@ struct MemoryStatusView: View {
                         .disabled(busy)
                 }
                 Section {
-                    Text("在「注入」页对游戏执行「内存补丁」后，到这里查看是否 OK（如 flag=1）。不在此页注入。")
+                    Text("「部署」一键部署后开游戏会自动补丁；或「注入」页手动补丁。OK 时看 flag=1、spoof≥1、jb=1（已越狱）。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -47,7 +47,7 @@ struct MemoryStatusView: View {
             }
             DispatchQueue.main.async {
                 if body.isEmpty {
-                    statusText = "无状态\n请先在注入页做内存补丁"
+                    statusText = "无状态\n请先部署后开游戏，或注入页手动补丁"
                 } else if body.hasPrefix("OK") {
                     statusText = "✅ \(body)"
                 } else {

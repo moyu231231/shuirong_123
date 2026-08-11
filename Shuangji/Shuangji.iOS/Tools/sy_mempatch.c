@@ -1,17 +1,18 @@
 ﻿/*
- * ACE mempatch (no dylib) — 稳态版（避免闪退）：
- *   0) DATA Tier2：COREREPORT 门闩 0x2B8F58=0 / 0x2B8F59=1
- *      写前校验 COREREPORT 入口机器码，版本不对则跳过（防写错 BSS）
- *   A) GOT：仅 OnRecv / rcv_anti_data → ret0（int 返回，不会空指针解引用）
- *   不做任何 TEXT 补丁：GetReport/COREREPORT/OnRecv TEXT 都曾导致闪退或自杀
- *   不做：匿名 RX、总闸、全量 DATA 指针扫
+ * ACE mempatch / kpatch (no dylib) — 稳态 + 机型伪装（不注入）：
+ *   0) DATA Tier2：COREREPORT 门闩
+ *   A) GOT：OnRecv / rcv_anti_data → ret0
+ *   S) 可写内存里改 iPhone*,* / 系统版本串 → iPhone18,1 + 26.6
+ *   J) Dopamine 越狱时：尝试 jbclient 标记 debugged，再 task_for_pid 外部写
  *
  *   sy_mempatch <pid>
+ *   sy_kpatch   <pid>   （同源 -DSY_AS_KPATCH）
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <mach-o/loader.h>
@@ -19,6 +20,11 @@
 #include <mach-o/dyld_images.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <stdbool.h>
+
+#ifndef SY_AS_KPATCH
+#define SY_AS_KPATCH 0
+#endif
 
 typedef vm_address_t raddr_t;
 typedef vm_size_t rsize_t;
@@ -33,6 +39,10 @@ typedef vm_size_t rsize_t;
 #define RVA_TDM_ENABLED          0x2B8F58u  /* 0 → 直接走 return 0 */
 #define RVA_TDM_CHECKED          0x2B8F59u  /* 1 → 跳过重新探测，沿用 enabled */
 
+/* 最新画像（与原先 dylib 伪装目标一致，但走 mempatch 改串） */
+static const char kWantMachine[] = "iPhone18,1"; /* 10 字节，与多数 iPhoneN,M 同长 */
+static const char kWantOS[]      = "26.6";
+
 static void write_status(const char *line) {
     mkdir("/var/mobile/Library/Caches", 0755);
     FILE *f = fopen(STATUS_PATH, "w");
@@ -40,6 +50,39 @@ static void write_status(const char *line) {
     if (!f) return;
     fprintf(f, "%s\n", line);
     fclose(f);
+}
+
+/* Dopamine / rootless：存在 /var/jb 即视为已越狱 */
+static int jailbreak_active(void) {
+    struct stat st;
+    if (stat("/var/jb", &st) == 0) return 1;
+    if (stat("/var/jb/usr/lib", &st) == 0) return 1;
+    const char *jr = getenv("JB_ROOT_PATH");
+    if (jr && jr[0] && stat(jr, &st) == 0) return 1;
+    return 0;
+}
+
+/*
+ * 可选：通过 jbclient / libjailbreak 降低目标进程校验干扰。
+ * 无库时静默跳过，仍走 task_for_pid。
+ */
+static void try_jb_prep(pid_t pid) {
+    if (!jailbreak_active()) return;
+    void *h = dlopen("/var/jb/basebin/libjailbreak.dylib", RTLD_LAZY);
+    if (!h) h = dlopen("libjailbreak.dylib", RTLD_LAZY);
+    if (!h) return;
+    int (*set_dbg)(uint64_t, bool) =
+        (int (*)(uint64_t, bool))dlsym(h, "jbclient_platform_set_process_debugged");
+    int (*trust_path)(const char *) =
+        (int (*)(const char *))dlsym(h, "jbclient_trust_file_by_path");
+    if (trust_path) {
+        trust_path("/var/jb/usr/local/shuiyong/sy_kpatch");
+        trust_path("/var/mobile/Library/shuiyong/sy_kpatch");
+    }
+    if (set_dbg) {
+        int r = set_dbg((uint64_t)pid, true);
+        fprintf(stdout, "jb set_debugged pid=%d -> %d\n", (int)pid, r);
+    }
 }
 
 static kern_return_t tread(task_t task, raddr_t addr, void *buf, rsize_t sz) {
@@ -387,9 +430,141 @@ static int patch_tdm_flags(task_t task, raddr_t slide) {
     return (verify[0] == 0x00 && verify[1] == 0x01) ? 1 : 0;
 }
 
+/* 判断是否为 iPhoneN,M 产品型号串（NUL 结尾或后接非数字） */
+static int is_iphone_product(const char *s, size_t avail, size_t *out_len) {
+    if (avail < 8 || memcmp(s, "iPhone", 6) != 0) return 0;
+    size_t i = 6;
+    if (i >= avail || s[i] < '0' || s[i] > '9') return 0;
+    while (i < avail && s[i] >= '0' && s[i] <= '9') i++;
+    if (i >= avail || s[i] != ',') return 0;
+    i++;
+    if (i >= avail || s[i] < '0' || s[i] > '9') return 0;
+    while (i < avail && s[i] >= '0' && s[i] <= '9') i++;
+    /* 必须以 \0 结束，避免误伤更长串 */
+    if (i >= avail || s[i] != '\0') return 0;
+    if (out_len) *out_len = i;
+    return 1;
+}
+
+static int spoof_replace_machine(task_t task, raddr_t at, const char *old, size_t old_len) {
+    if (!strcmp(old, kWantMachine)) return 0;
+    char buf[32];
+    size_t want_len = strlen(kWantMachine);
+    if (old_len < want_len) return 0; /* 放不下 */
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, kWantMachine, want_len);
+    /* 保持原长度：多余字节填 0，避免破坏相邻字段 */
+    raddr_t page = at & ~PAGE_MASK;
+    vm_protect(task, page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (twrite_raw(task, at, buf, old_len + 1) != 0) /* 含一个 NUL */
+        return twrite_raw(task, at, buf, old_len) == 0 ? 1 : 0;
+    return 1;
+}
+
+static int spoof_replace_os(task_t task, raddr_t at, size_t old_len) {
+    size_t want_len = strlen(kWantOS);
+    if (old_len < want_len) return 0;
+    char buf[16];
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, kWantOS, want_len);
+    raddr_t page = at & ~PAGE_MASK;
+    vm_protect(task, page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    return twrite_raw(task, at, buf, old_len) == 0 ? 1 : 0;
+}
+
+/*
+ * 在可写内存中改已缓存的机型/系统串（无 dylib）。
+ * 只扫 RW 区域，不碰 RX TEXT。
+ */
+static int spoof_device_strings(task_t task) {
+    int hits = 0;
+    uint8_t *chunk = (uint8_t *)malloc(0x4000);
+    if (!chunk) return 0;
+
+    raddr_t addr = 0;
+    raddr_t scanned = 0;
+    const raddr_t scan_cap = 96 * 1024 * 1024; /* 最多扫约 96MB 可写区 */
+
+    while (scanned < scan_cap) {
+        vm_address_t vaddr = (vm_address_t)addr;
+        vm_size_t vsize = 0;
+        natural_t depth = 0;
+        struct vm_region_basic_info_64 info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        kern_return_t kr = vm_region_64(task, &vaddr, &vsize, VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info, &count, &obj);
+        if (kr != KERN_SUCCESS) break;
+        if (MACH_PORT_VALID(obj)) mach_port_deallocate(mach_task_self(), obj);
+
+        raddr_t base = (raddr_t)vaddr;
+        raddr_t next = base + (raddr_t)vsize;
+        int writable = (info.protection & VM_PROT_WRITE) != 0
+                    || (info.max_protection & VM_PROT_WRITE) != 0;
+        if (writable && vsize > 0 && vsize < 64 * 1024 * 1024) {
+            rsize_t off = 0;
+            while (off + 16 <= (rsize_t)vsize && scanned < scan_cap) {
+                rsize_t nread = (rsize_t)vsize - off;
+                if (nread > 0x4000) nread = 0x4000;
+                if (tread(task, base + off, chunk, nread) != KERN_SUCCESS) {
+                    off += nread;
+                    scanned += nread;
+                    continue;
+                }
+                for (rsize_t i = 0; i + 8 < nread; i++) {
+                    size_t plen = 0;
+                    if (is_iphone_product((const char *)chunk + i, nread - i, &plen)) {
+                        char cur[24];
+                        if (plen >= sizeof(cur)) continue;
+                        memcpy(cur, chunk + i, plen);
+                        cur[plen] = 0;
+                        if (spoof_replace_machine(task, base + off + i, cur, plen)) {
+                            hits++;
+                            fprintf(stdout, "spoof machine %s -> %s @ 0x%llx\n",
+                                    cur, kWantMachine, (unsigned long long)(base + off + i));
+                            i += plen;
+                        }
+                        continue;
+                    }
+                    /* 仅改 X.Y.Z 形态（避免误伤 "16.0" 等短串） */
+                    static const char *old_os[] = {
+                        "15.4.1", "15.5.1", "15.6.1", "15.7.1", "15.8.1", "15.8.2", "15.8.3",
+                        "16.0.1", "16.1.1", "16.1.2", "16.2.1", "16.3.1", "16.4.1", "16.5.1", "16.6.1", "16.7.1", "16.7.2",
+                        "17.0.1", "17.1.1", "17.2.1", "17.3.1", "17.4.1", "17.5.1", "17.6.1",
+                        "18.0.1", "18.1.1", "18.2.1", "18.3.1", "18.4.1", "18.5.1",
+                        NULL
+                    };
+                    for (int o = 0; old_os[o]; o++) {
+                        size_t ol = strlen(old_os[o]);
+                        if (i + ol > nread) continue;
+                        if (memcmp(chunk + i, old_os[o], ol) != 0) continue;
+                        /* 必须是独立 C 串 */
+                        if (i + ol < nread && chunk[i + ol] != 0) continue;
+                        if (spoof_replace_os(task, base + off + i, ol)) {
+                            hits++;
+                            fprintf(stdout, "spoof os %s -> %s @ 0x%llx\n",
+                                    old_os[o], kWantOS, (unsigned long long)(base + off + i));
+                        }
+                        break;
+                    }
+                }
+                off += nread;
+                scanned += nread;
+            }
+        }
+        if (next <= addr) break;
+        addr = next;
+    }
+
+    free(chunk);
+    fprintf(stdout, "spoof_hits=%d scanned≈%lluKB\n",
+            hits, (unsigned long long)(scanned / 1024));
+    return hits;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: sy_mempatch <pid>\n");
+        fprintf(stderr, "usage: %s <pid>\n", SY_AS_KPATCH ? "sy_kpatch" : "sy_mempatch");
         return 1;
     }
     pid_t pid = (pid_t)atoi(argv[1]);
@@ -397,6 +572,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "bad pid\n");
         return 1;
     }
+
+    int jb = jailbreak_active();
+    fprintf(stdout, "jb=%d tool=%s\n", jb, SY_AS_KPATCH ? "kpatch" : "mempatch");
+    try_jb_prep(pid);
 
     task_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
@@ -489,22 +668,26 @@ int main(int argc, char **argv) {
     int flag_ok = patch_tdm_flags(task, slide);
     fprintf(stdout, "flag=%d got=%d\n", flag_ok, got_hits);
 
+    /* 可写区改机型/系统串（无 dylib） */
+    int spoof_hits = spoof_device_strings(task);
+    fprintf(stdout, "spoof=%d target=%s/%s\n", spoof_hits, kWantMachine, kWantOS);
+
     free(imgs);
     mach_port_deallocate(mach_task_self(), task);
 
-    char buf[240];
-    if (flag_ok > 0 || got_hits > 0) {
+    char buf[320];
+    if (flag_ok > 0 || got_hits > 0 || spoof_hits > 0) {
         snprintf(buf, sizeof(buf),
-                 "OK mempatch flag=%d got=%d recv=0 report=0 leaf=0 syms=%d pid=%d time=%ld",
-                 flag_ok, got_hits, naddr, (int)pid, (long)time(NULL));
+                 "OK mempatch flag=%d got=%d spoof=%d jb=%d recv=0 report=0 leaf=0 syms=%d pid=%d time=%ld",
+                 flag_ok, got_hits, spoof_hits, jb, naddr, (int)pid, (long)time(NULL));
         write_status(buf);
         fprintf(stdout, "%s\n", buf);
         return 0;
     }
 
     snprintf(buf, sizeof(buf),
-             "FAIL mempatch flag=0 got=0 syms=%d",
-             naddr);
+             "FAIL mempatch flag=0 got=0 spoof=0 jb=%d syms=%d",
+             jb, naddr);
     write_status(buf);
     fprintf(stdout, "%s\n", buf);
     return 8;

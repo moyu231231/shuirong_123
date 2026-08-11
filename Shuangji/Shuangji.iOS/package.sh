@@ -71,7 +71,7 @@ if [[ -z "$APP_PATH" ]]; then
 fi
 echo "APP=$APP_PATH"
 
-echo "==> [4/6] 编 syinject/sy_mempatch、拉取 ct_bypass/ldid、塞进 App"
+echo "==> [4/6] 编 syinject/sy_mempatch/sy_kpatch/sy_watch、拉取 ct_bypass/ldid、塞进 App"
 mkdir -p "$APP_PATH"
 SDKROOT_IOS="$(xcrun --sdk iphoneos --show-sdk-path)"
 clang -arch arm64 -isysroot "$SDKROOT_IOS" \
@@ -84,6 +84,17 @@ clang -arch arm64 -isysroot "$SDKROOT_IOS" \
   -o "$APP_PATH/sy_mempatch" "$ROOT/Tools/sy_mempatch.c"
 chmod +x "$APP_PATH/sy_mempatch"
 echo "  + sy_mempatch"
+# Dopamine 路径同名工具（jb prep + 同补丁逻辑）
+clang -arch arm64 -isysroot "$SDKROOT_IOS" \
+  -miphoneos-version-min=15.0 -O2 -DSY_AS_KPATCH=1 \
+  -o "$APP_PATH/sy_kpatch" "$ROOT/Tools/sy_mempatch.c"
+chmod +x "$APP_PATH/sy_kpatch"
+echo "  + sy_kpatch"
+clang -arch arm64 -isysroot "$SDKROOT_IOS" \
+  -miphoneos-version-min=15.0 -O2 \
+  -o "$APP_PATH/sy_watch" "$ROOT/Tools/sy_watch.c"
+chmod +x "$APP_PATH/sy_watch"
+echo "  + sy_watch"
 
 # 注入用 dylib：只当资源拷进 App 根目录，禁止放进 Frameworks（避免被误加载）
 DYLIB="$(find "$DERIVED/Build/Products" -name 'ShuiyongMem.dylib' | head -n1 || true)"
@@ -106,9 +117,19 @@ if [[ -n "$DYLIB" ]]; then
   # 唯一名：禁止用 ApolloNetService（会盖掉腾讯正版库导致秒闪）
   cp -f "$DYLIB" "$APP_PATH/sy_ports.dylib"
   cp -f "$DYLIB" "$APP_PATH/ShuiyongMem.dylib" || true
+  # 可选 Filter tweak 载荷（部署页开关启用）
+  mkdir -p "$APP_PATH/Deploy"
+  cp -f "$DYLIB" "$APP_PATH/ShuiyongSpoof.dylib"
+  cp -f "$DYLIB" "$APP_PATH/Deploy/ShuiyongSpoof.dylib"
+  if [[ -f "$ROOT/Resources/Deploy/ShuiyongSpoof.plist" ]]; then
+    cp -f "$ROOT/Resources/Deploy/ShuiyongSpoof.plist" "$APP_PATH/ShuiyongSpoof.plist"
+    cp -f "$ROOT/Resources/Deploy/ShuiyongSpoof.plist" "$APP_PATH/Deploy/ShuiyongSpoof.plist"
+  fi
   rm -f "$APP_PATH/Frameworks/ShuiyongMem.dylib" \
         "$APP_PATH/Frameworks/sy_ports.dylib" \
-        "$APP_PATH/Frameworks/ApolloNetService.dylib" 2>/dev/null || true
+        "$APP_PATH/Frameworks/ApolloNetService.dylib" \
+        "$APP_PATH/Frameworks/ShuiyongSpoof.dylib" 2>/dev/null || true
+  echo "  + ShuiyongSpoof (tweak payload)"
 else
   echo "错误: 找不到 ShuiyongMem.dylib"; exit 1
 fi
@@ -189,6 +210,23 @@ if [[ ! -f "$APP_PATH/opainject" ]]; then
   fi
 fi
 
+echo "==> [4b/6] 内置官方 Dopamine.tipa（一键越狱用）"
+# 可用 BUNDLE_DOPAMINE=0 跳过（tipa 会小约 55MB；运行时再下载）
+DOPAMINE_VER="${DOPAMINE_VER:-3.0.4}"
+DOPAMINE_URL="${DOPAMINE_URL:-https://github.com/opa334/Dopamine/releases/download/${DOPAMINE_VER}/Dopamine.tipa}"
+if [[ "${BUNDLE_DOPAMINE:-1}" == "1" ]]; then
+  if curl -fL --retry 3 -o "$APP_PATH/Dopamine.tipa" "$DOPAMINE_URL"; then
+    mkdir -p "$APP_PATH/Deploy"
+    cp -f "$APP_PATH/Dopamine.tipa" "$APP_PATH/Deploy/Dopamine.tipa"
+    ls -lh "$APP_PATH/Dopamine.tipa"
+    echo "  + Dopamine.tipa (${DOPAMINE_VER})"
+  else
+    echo "警告: 下载 Dopamine.tipa 失败，一键越狱将改为运行时下载"
+  fi
+else
+  echo "  skip BUNDLE_DOPAMINE=0"
+fi
+
 echo "==> [5/6] ldid 伪签（必须带 App.entitlements，否则注入页读不到已装应用）"
 ENT_APP="$ROOT/entitlements/App.entitlements"
 ENT_TUN="$ROOT/entitlements/Tunnel.entitlements"
@@ -228,14 +266,18 @@ if [[ -f "$APP_PATH/opainject" ]]; then
     ldid -S "$APP_PATH/opainject" || true
   fi
 fi
-if [[ -f "$APP_PATH/sy_mempatch" ]]; then
-  if [[ -f "$OPA_ENT" ]]; then
-    ldid -S"$OPA_ENT" "$APP_PATH/sy_mempatch" || ldid -S "$APP_PATH/sy_mempatch" || true
-  else
-    ldid -S "$APP_PATH/sy_mempatch" || true
+for patchbin in sy_mempatch sy_kpatch sy_watch; do
+  if [[ -f "$APP_PATH/$patchbin" ]]; then
+    if [[ -f "$OPA_ENT" ]]; then
+      ldid -S"$OPA_ENT" "$APP_PATH/$patchbin" || ldid -S "$APP_PATH/$patchbin" || true
+    else
+      ldid -S "$APP_PATH/$patchbin" || true
+    fi
+    echo "  signed $patchbin"
   fi
-  echo "  signed sy_mempatch"
-fi
+done
+[[ -f "$APP_PATH/ShuiyongSpoof.dylib" ]] && ldid -S "$APP_PATH/ShuiyongSpoof.dylib" || true
+[[ -f "$APP_PATH/Deploy/ShuiyongSpoof.dylib" ]] && ldid -S "$APP_PATH/Deploy/ShuiyongSpoof.dylib" || true
 # 扩展
 EXT="$(find "$APP_PATH/PlugIns" -name '*.appex' 2>/dev/null | head -n1 || true)"
 if [[ -n "$EXT" ]]; then

@@ -72,11 +72,13 @@ enum BuiltinInjector {
         "libquic_migration.dylib"
     ]
 
-    /// 纯内存补丁：无 dylib / 无 opainject（注入易异常）
+    /// 纯内存补丁：无 dylib。含 DATA 门闩 + GOT + 可写区机型串伪装。
+    /// 优先 sy_kpatch（Dopamine 部署路径），否则 sy_mempatch。
     static func memPatch(into app: AppEntry, settleSeconds: Int = 55) throws {
         guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
-        guard let mp = toolURL("sy_mempatch") else {
-            throw InjectError.noTool("sy_mempatch（请重装新 tipa）")
+        let mp = toolURL("sy_kpatch") ?? toolURL("sy_mempatch")
+        guard let mp else {
+            throw InjectError.noTool("sy_kpatch/sy_mempatch（请重装新 tipa）")
         }
 
         if isInjected(bundleURL: app.bundleURL) {

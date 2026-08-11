@@ -26,7 +26,7 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Text("推荐：内存补丁（纯 mempatch，无注入）· 可先清理设备标识")
+                Text("推荐先「部署」页一键部署（Dopamine 越狱后自动补丁）。本页可手动补丁 / 清理设备标识。")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -89,7 +89,7 @@ struct InjectHomeView: View {
                                 } else {
                                     Menu {
                                         Button("清理设备标识") { cleanDeviceIDs(app) }
-                                        Button("内存补丁（稳态·无注入）") { memPatch(app) }
+                                        Button("内存补丁（稳态·含机型伪装）") { memPatch(app) }
                                         Button("打开游戏") { launch(app.bundleID) }
                                         if app.isInjected {
                                             Button("清磁盘残留", role: .destructive) { eject(app) }
@@ -147,7 +147,7 @@ struct InjectHomeView: View {
 
     private func memPatch(_ app: AppEntry) {
         busyID = app.bundleID
-        banner = "纯内存补丁：启动 → 等 tersafe → sy_mempatch（无注入）…"
+        banner = "内存补丁：启动 → 等 tersafe → 门闩/GOT + 改机型串（无注入）…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try BuiltinInjector.memPatch(into: app, settleSeconds: 55)

@@ -10,3 +10,7 @@
 产物：dist/水溶C.tipa
 
 Windows 双击 package.cmd 会打开无 Mac 说明，不会本地编译。
+
+装机推荐：TrollStore 装 tipa → 部署页「一键越狱并部署」（内置 Dopamine）→ 开游戏自动补丁。
+打包默认会下载 Dopamine.tipa 打进包；小包可用 BUNDLE_DOPAMINE=0。
+详见 README.md / 新手无Mac手把手.txt 第 12 章。

@@ -27,6 +27,10 @@ targets:
       - path: App
       - path: Shared
       - path: Resources/Assets.xcassets
+      - path: Resources/Deploy
+        buildPhase: resources
+        excludes:
+          - README.txt
     settings:
       base:
         INFOPLIST_GENERATION_MODE: Generated

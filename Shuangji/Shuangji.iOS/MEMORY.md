@@ -12,15 +12,18 @@
 | Hook `tersafe` 导出符号 | ❌ | ✅ fishhook / 自写 | ✅ |
 | 改 `__TEXT` 指令 / RVA | ❌ 易杀进程 | ❌ 易杀 | ✅ ElleKit |
 
-**推荐组合（给 TrollStore 用户）：**
+**推荐组合（2026：一键越狱并部署）：**
 
 ```text
-水溶C App（控制台 + 隧道双层）
-    +
-TrollFools 把「水溶C-Mem.dylib」注入游戏
-    → 进程内 Hook tersafe 导出 / get_report_data
-    → 从源头掐 send_cs / send_gs 报告队列
+水溶C 内置官方 Dopamine.tipa
+    → 部署页「一键越狱并部署」
+    → TrollStore 安装 / 打开 Dopamine 点 Jailbreak
+    → 自动部署 sy_kpatch / sy_watch
+    → 游戏启动后外部补丁（门闩 + GOT + 机型串）
+    + 双机链路（Gateway/Engine）
 ```
+
+备选（不越狱）：注入页手动 `sy_mempatch`。
 
 ---
 
