@@ -113,7 +113,7 @@ enum DeployEnvironment {
     @discardableResult
     static func deploy(state: JBState) throws -> String {
         let sy = try syinject()
-        let root = installRoot(for: state)
+        let root = JBRootFinder.mobileFallback
         var log: [String] = []
         log.append("root=\(root)")
         log.append("jb=\(state.label)")
@@ -121,55 +121,66 @@ enum DeployEnvironment {
         try writeConf(root: root)
         log.append("conf OK")
 
-        // 始终装到 mobile（RootHide 无 /var/jb 时也能跑）；越狱根再备份一份
-        let installRoots = JBRootFinder.toolInstallRoots()
-        for ir in installRoots {
-            _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", ir])
-        }
-        _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", confDir])
-
+        // 只装到 /var/mobile/Library/shuiyong（一次 installtools，避免几十次 spawn 卡住）
+        var args: [String] = ["installtools", "--dst", root]
         let bins = ["sy_kpatch", "sy_mempatch", "sy_watch", "syinject"]
+        var missingRequired = false
         for name in bins {
             guard let src = toolURL(name) else {
                 if name == "sy_kpatch" || name == "sy_watch" {
-                    throw DeployError.failed("缺少 \(name)，请用新 tipa 打包")
+                    missingRequired = true
                 }
                 continue
             }
-            for ir in installRoots {
-                let dst = "\(ir)/\(name)"
-                _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", dst])
-                let r = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", dst])
-                if r.code != 0 && ir == JBRootFinder.mobileFallback {
-                    throw DeployError.failed("拷贝 \(name) 失败：\(r.err.isEmpty ? r.out : r.err)")
-                }
-                _ = SpawnUtil.rootRun(sy.path, args: ["chmod", "--path", dst, "--mode", "0755"])
-            }
+            args.append(contentsOf: ["--src", src.path])
             log.append("+\(name)")
         }
-        log.append("paths=\(installRoots.joined(separator: ","))")
+        if missingRequired {
+            throw DeployError.failed("缺少 sy_kpatch/sy_watch，请用新 tipa 打包")
+        }
+        let inst = SpawnUtil.rootRun(sy.path, args: args)
+        if inst.code != 0 {
+            // 旧 tipa 无 installtools：回退逐个 cp（仍可能慢，但能用）
+            if inst.err.contains("unknown") || inst.out.contains("unknown") || inst.code == 1 {
+                for name in bins {
+                    guard let src = toolURL(name) else { continue }
+                    let dst = "\(root)/\(name)"
+                    _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", root])
+                    _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", dst])
+                    let r = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", dst])
+                    if r.code != 0 {
+                        throw DeployError.failed("拷贝 \(name) 失败：\(r.err.isEmpty ? r.out : r.err)")
+                    }
+                }
+                log.append("installtools fallback")
+            } else {
+                throw DeployError.failed("安装工具失败：\(inst.err.isEmpty ? inst.out : inst.err)")
+            }
+        }
         if JBRootFinder.isRootHideStyle {
             log.append("flavor=RootHide")
         }
 
-        // LaunchDaemon plist（越狱态）
-        if state.isJailbroken {
-            try installLaunchDaemon(sy: sy, root: root, log: &log)
-        }
+        // 不写 LaunchDaemon：RootHide 上易卡；守护只靠 runbg
+        log.append("LaunchDaemon skip")
 
+        // tweak 失败不阻断部署（拷大 dylib / 扫目录很容易拖慢或超时）
         if autoTweak {
             if state.isJailbroken {
-                try enableTweak(sy: sy, state: state, log: &log)
+                do {
+                    try enableTweak(sy: sy, state: state, log: &log)
+                } catch {
+                    log.append("tweak skip:\(error.localizedDescription)")
+                }
             } else {
-                try disableTweak(sy: sy, state: state, log: &log)
                 log.append("tweak需越狱，已跳过")
             }
         } else {
-            try disableTweak(sy: sy, state: state, log: &log)
+            // 关开关时不扫全盘卸 tweak，避免慢
+            log.append("tweak OFF(skip uninstall)")
         }
 
-        // 拉起守护：永远从 mobile 路径起（RootHide 兼容）
-        try startWatch(sy: sy, root: JBRootFinder.mobileFallback, log: &log)
+        try startWatch(sy: sy, root: root, log: &log)
 
         let summary = log.joined(separator: " | ")
         UserDefaults.standard.set(true, forKey: "sy_deployed_once")
@@ -178,16 +189,14 @@ enum DeployEnvironment {
     }
 
     static func stopWatch() {
-        guard let sy = try? syinject() else { return }
+        // 只杀 pidfile；禁止 killall（RootHide 上常永久挂起）
         let pidfile = confDir + "/sy_watch.pid"
         if let data = try? String(contentsOfFile: pidfile, encoding: .utf8),
            let pid = Int(data.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
             _ = SpawnUtil.rootRun("/bin/kill", args: ["-9", "\(pid)"])
         }
-        for r in JBRootFinder.toolInstallRoots() {
-            _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", "\(r)/sy_watch.pid"])
-        }
-        _ = SpawnUtil.rootRun("/usr/bin/killall", args: ["-9", "sy_watch"])
+        try? FileManager.default.removeItem(atPath: pidfile)
+        try? FileManager.default.removeItem(atPath: "\(JBRootFinder.mobileFallback)/sy_watch.pid")
     }
 
     static func startWatchOnly() throws -> String {
@@ -270,7 +279,8 @@ enum DeployEnvironment {
         guard let filter = bundledSpoofPlist() else {
             throw DeployError.failed("缺少 ShuiyongSpoof.plist")
         }
-        let dirs = tweakDirs(for: state)
+        // 最多试 2 个目录，避免 RootHide 扫盘拖死
+        let dirs = Array(tweakDirs(for: state).prefix(2))
         guard let dir = dirs.first(where: { candidate in
             let r = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", candidate])
             return r.code == 0 || FileManager.default.fileExists(atPath: candidate)
@@ -303,24 +313,18 @@ enum DeployEnvironment {
 
     private static func startWatch(sy: URL, root: String, log: inout [String]) throws {
         stopWatch()
-        Thread.sleep(forTimeInterval: 0.3)
+        Thread.sleep(forTimeInterval: 0.2)
         let bin = "\(root)/sy_watch"
-        let ex = SpawnUtil.rootRun(sy.path, args: ["exists", "--path", bin])
-        if ex.code != 0 && !FileManager.default.fileExists(atPath: bin) {
+        if !FileManager.default.fileExists(atPath: bin) {
             if let src = toolURL("sy_watch") {
-                _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", root])
-                _ = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", bin])
+                _ = SpawnUtil.rootRun(sy.path, args: [
+                    "installtools", "--dst", root, "--src", src.path
+                ])
             }
         }
-        _ = SpawnUtil.rootRun(sy.path, args: ["chmod", "--path", bin, "--mode", "0755"])
-        for name in ["sy_kpatch", "sy_mempatch", "syinject"] {
-            _ = SpawnUtil.rootRun(sy.path, args: [
-                "chmod", "--path", "\(root)/\(name)", "--mode", "0755"
-            ])
-        }
-        _ = SpawnUtil.rootRun(sy.path, args: [
-            "rm", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
-        ])
+        try? FileManager.default.removeItem(
+            atPath: "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
+        )
 
         // 只走 runbg，禁止再用 rootRun 直接跑 sy_watch（管道会死等）
         let bg = SpawnUtil.rootRun(sy.path, args: [
@@ -329,13 +333,12 @@ enum DeployEnvironment {
         let childPid = Int(bg.out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         log.append("runbg pid=\(childPid) code=\(bg.code)")
 
+        // 最多约 1 秒等心跳；没有也不阻断部署
         var alive = false
-        for _ in 0..<6 { // 最多约 3 秒
-            Thread.sleep(forTimeInterval: 0.5)
-            let heart = SpawnUtil.rootRun(sy.path, args: [
-                "cat", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
-            ])
-            if heart.out.contains("alive=1") {
+        let hb = "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
+        for _ in 0..<4 {
+            Thread.sleep(forTimeInterval: 0.25)
+            if let s = try? String(contentsOfFile: hb, encoding: .utf8), s.contains("alive=1") {
                 alive = true
                 break
             }
@@ -346,7 +349,6 @@ enum DeployEnvironment {
             log.append("watch heartbeat OK")
             stamp = "WAIT sy_watch armed time=\(Int(Date().timeIntervalSince1970))"
         } else {
-            // 不阻断部署：可稍后在内存页「重启守护」/「立即补丁」
             log.append("watch no heartbeat(non-fatal)")
             stamp = "WAIT deploy_ok watch_pending time=\(Int(Date().timeIntervalSince1970))"
         }

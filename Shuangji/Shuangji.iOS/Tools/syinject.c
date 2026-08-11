@@ -535,7 +535,7 @@ static int cleandevid_walk(const char *dir, int depth, int *removed) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject mkdir|cp|rm|chmod|chown33|exists|cleandevid|enc|find|pid|cat|runbg|deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chmod|chown33|exists|cleandevid|enc|find|pid|cat|runbg|installtools|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
@@ -547,10 +547,15 @@ int main(int argc, char **argv) {
     const char *dylib = "@rpath/sy_ports.dylib";
     const char *name = "sy_ports.dylib";
     const char *contains = NULL;
+    const char *srcs[32];
+    int nsrcs = 0;
     int weak = 1;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--app") && i + 1 < argc) app = argv[++i];
-        else if (!strcmp(argv[i], "--src") && i + 1 < argc) src = argv[++i];
+        else if (!strcmp(argv[i], "--src") && i + 1 < argc) {
+            src = argv[++i];
+            if (nsrcs < 32) srcs[nsrcs++] = src;
+        }
         else if (!strcmp(argv[i], "--dst") && i + 1 < argc) dst = argv[++i];
         else if (!strcmp(argv[i], "--path") && i + 1 < argc) path = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
@@ -626,6 +631,30 @@ int main(int argc, char **argv) {
         if (copy_file(src, dst) != 0) { perror("cp"); return 2; }
         chown_installd(dst);
         return 0;
+    }
+    /* 一次进程装完所有工具：mkdir + 多文件 cp + 0755，避免部署时几十次 spawn */
+    if (!strcmp(mode, "installtools")) {
+        if (!dst || nsrcs < 1) { fprintf(stderr, "need --dst --src ...\n"); return 1; }
+        if (mkdir_p(dst) != 0) { perror("mkdir"); return 2; }
+        int ok = 0;
+        for (int i = 0; i < nsrcs; i++) {
+            const char *s = srcs[i];
+            const char *base = strrchr(s, '/');
+            base = base ? base + 1 : s;
+            char outp[1200];
+            snprintf(outp, sizeof(outp), "%s/%s", dst, base);
+            unlink(outp);
+            if (copy_file(s, outp) == 0) {
+                chmod(outp, 0755);
+                chown_installd(outp);
+                ok++;
+                fprintf(stdout, "+%s\n", base);
+            } else {
+                fprintf(stderr, "fail %s\n", s);
+            }
+        }
+        fprintf(stdout, "ok=%d\n", ok);
+        return ok > 0 ? 0 : 3;
     }
     if (!strcmp(mode, "rm")) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }

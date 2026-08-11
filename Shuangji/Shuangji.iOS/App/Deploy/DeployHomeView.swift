@@ -52,6 +52,9 @@ struct DeployHomeView: View {
                         .onChange(of: autoTweak) { v in
                             DeployEnvironment.autoTweak = v
                         }
+                    Text("想部署更快可先关掉机型 tweak；外部内存补丁已够用。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                     Stepper("settle \(settle)s", value: $settle, in: 20...120, step: 5)
                         .onChange(of: settle) { v in
                             DeployEnvironment.settleSeconds = v
