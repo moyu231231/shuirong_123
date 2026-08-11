@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
@@ -51,7 +52,8 @@ static int copy_file(const char *src, const char *dst) {
     if (!b) { perror(src); return -1; }
     int rc = write_all(dst, b, n);
     free(b);
-    if (rc == 0) chmod(dst, 0644);
+    /* 必须可执行：否则部署后的 sy_watch/sy_kpatch 起不来 */
+    if (rc == 0) chmod(dst, 0755);
     return rc;
 }
 
@@ -533,7 +535,7 @@ static int cleandevid_walk(const char *dir, int depth, int *removed) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject mkdir|cp|rm|chown33|exists|cleandevid|enc|find|pid|cat|deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chmod|chown33|exists|cleandevid|enc|find|pid|cat|runbg|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
@@ -555,12 +557,61 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dylib") && i + 1 < argc) dylib = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--contains") && i + 1 < argc) contains = argv[++i];
+        else if (!strcmp(argv[i], "--mode") && i + 1 < argc) i++; /* chmod 里再读 */
+        else if (!strcmp(argv[i], "--bin") && i + 1 < argc) i++;
+        else if (!strcmp(argv[i], "--arg") && i + 1 < argc) i++;
         else if (!strcmp(argv[i], "--weak")) weak = 1;
         else if (!strcmp(argv[i], "--strong")) weak = 0;
         else if (!strcmp(argv[i], "--rpath") && i + 1 < argc) i++;
     }
 
     /* 文件系统小工具：以 root persona spawn 后在本进程内读写，不依赖 /bin/cp */
+    if (!strcmp(mode, "chmod")) {
+        if (!path) { fprintf(stderr, "need --path\n"); return 1; }
+        mode_t m = 0755;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
+                m = (mode_t)strtol(argv[++i], NULL, 8);
+            }
+        }
+        if (chmod(path, m) != 0) { perror("chmod"); return 2; }
+        fprintf(stdout, "OK chmod %o\n", (unsigned)m);
+        return 0;
+    }
+    /* 后台启动：fork+exec，父进程立刻返回（给 sy_watch --fg 用） */
+    if (!strcmp(mode, "runbg")) {
+        const char *bin = NULL;
+        char *args_store[16];
+        int nargs = 0;
+        memset(args_store, 0, sizeof(args_store));
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i], "--bin") && i + 1 < argc) bin = argv[++i];
+            else if (!strcmp(argv[i], "--arg") && i + 1 < argc && nargs < 14) {
+                args_store[nargs++] = argv[++i];
+            }
+        }
+        if (!bin) { fprintf(stderr, "need --bin\n"); return 1; }
+        pid_t p = fork();
+        if (p < 0) { perror("fork"); return 2; }
+        if (p > 0) {
+            fprintf(stdout, "%d\n", (int)p);
+            return 0;
+        }
+        /* child */
+        setsid();
+        int fd = open("/dev/null", O_RDWR);
+        if (fd >= 0) {
+            dup2(fd, 0);
+            if (fd > 0) close(fd);
+        }
+        char *argv_exec[18];
+        int ai = 0;
+        argv_exec[ai++] = (char *)bin;
+        for (int i = 0; i < nargs; i++) argv_exec[ai++] = args_store[i];
+        argv_exec[ai] = NULL;
+        execv(bin, argv_exec);
+        _exit(127);
+    }
     if (!strcmp(mode, "mkdir")) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }
         if (mkdir_p(path) != 0) { perror("mkdir"); return 2; }

@@ -143,6 +143,7 @@ enum DeployEnvironment {
                 if r.code != 0 && ir == JBRootFinder.mobileFallback {
                     throw DeployError.failed("拷贝 \(name) 失败：\(r.err.isEmpty ? r.out : r.err)")
                 }
+                _ = SpawnUtil.rootRun(sy.path, args: ["chmod", "--path", dst, "--mode", "0755"])
             }
             log.append("+\(name)")
         }
@@ -307,36 +308,60 @@ enum DeployEnvironment {
         let bin = "\(root)/sy_watch"
         let ex = SpawnUtil.rootRun(sy.path, args: ["exists", "--path", bin])
         if ex.code != 0 && !FileManager.default.fileExists(atPath: bin) {
-            throw DeployError.failed("未找到 \(bin)，请重新部署")
-        }
-
-        // 先尝试 daemonize
-        let r = SpawnUtil.rootRun(bin, args: [])
-        Thread.sleep(forTimeInterval: 1.0)
-        let pidfile = confDir + "/sy_watch.pid"
-        var alive = false
-        if let data = try? String(contentsOfFile: pidfile, encoding: .utf8),
-           let pid = Int(data.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
-            let chk = SpawnUtil.rootRun("/bin/ps", args: ["-p", "\(pid)"])
-            // ps 不一定有；看 heartbeat
-            alive = true
-            _ = chk
-        }
-        let heart = SpawnUtil.rootRun(sy.path, args: ["cat", "--path",
-            "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"])
-        if heart.out.contains("alive=1") { alive = true }
-
-        if !alive {
-            // 守护没起来：后台常驻 --fg（跟 App 同会话，但能写状态）
-            log.append("daemon fail → fg")
-            DispatchQueue.global(qos: .utility).async {
-                _ = SpawnUtil.rootRun(bin, args: ["--fg"])
+            // 尝试从 App 包再拷一次
+            if let src = toolURL("sy_watch") {
+                _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", root])
+                _ = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", bin])
             }
-            Thread.sleep(forTimeInterval: 1.2)
         }
-        log.append("watch start code=\(r.code) alive=\(alive ? 1 : 0)")
+        // 强制可执行（旧 tipa 拷出来可能是 0644）
+        _ = SpawnUtil.rootRun(sy.path, args: ["chmod", "--path", bin, "--mode", "0755"])
+        for name in ["sy_kpatch", "sy_mempatch", "syinject"] {
+            _ = SpawnUtil.rootRun(sy.path, args: [
+                "chmod", "--path", "\(root)/\(name)", "--mode", "0755"
+            ])
+        }
 
-        // 强制刷新状态时间，避免界面仍显示旧 OK
+        // 清旧心跳，避免误判
+        _ = SpawnUtil.rootRun(sy.path, args: [
+            "rm", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
+        ])
+
+        // 用 syinject runbg 后台拉起 --fg（不依赖 daemonize，也不堵管道）
+        let bg = SpawnUtil.rootRun(sy.path, args: [
+            "runbg", "--bin", bin, "--arg", "--fg"
+        ])
+        let childPid = Int(bg.out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        log.append("runbg pid=\(childPid) code=\(bg.code)")
+
+        // 等心跳最多 5 秒
+        var alive = false
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.5)
+            let heart = SpawnUtil.rootRun(sy.path, args: [
+                "cat", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
+            ])
+            if heart.out.contains("alive=1") {
+                alive = true
+                break
+            }
+        }
+        if !alive {
+            // 再试直接 spawn daemon 模式
+            _ = SpawnUtil.rootRun(bin, args: [])
+            Thread.sleep(forTimeInterval: 1.0)
+            let heart2 = SpawnUtil.rootRun(sy.path, args: [
+                "cat", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
+            ])
+            alive = heart2.out.contains("alive=1")
+        }
+        if !alive {
+            throw DeployError.failed(
+                "sy_watch 仍无心跳。请重新「一键部署」后再试。log: \(bg.err.isEmpty ? bg.out : bg.err)"
+            )
+        }
+        log.append("watch heartbeat OK")
+
         let stamp = "WAIT sy_watch restarted time=\(Int(Date().timeIntervalSince1970))"
         let tmp = NSTemporaryDirectory() + "sy_ports_status.txt"
         try? stamp.write(toFile: tmp, atomically: true, encoding: .utf8)
