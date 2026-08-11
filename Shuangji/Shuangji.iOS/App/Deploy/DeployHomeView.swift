@@ -38,7 +38,7 @@ struct DeployHomeView: View {
                             .foregroundColor(.secondary)
                     }
                     Button("重新检测") { refresh() }
-                    Text("RootHide 没有 /var/jb，用水溶C 扫描 .jbroot-*。打三角洲时：RootHide Manager 里不要把游戏加入「隐藏越狱」黑名单，否则 tweak 进不去；外部 mempatch 仍可对游戏进程生效。")
+                    Text("一键部署不用开游戏。开游戏只为自动/立即补丁。RootHide 下勿把三角洲勾进「隐藏越狱」。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

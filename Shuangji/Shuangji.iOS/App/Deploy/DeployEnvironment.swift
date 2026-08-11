@@ -256,9 +256,8 @@ enum DeployEnvironment {
         _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", dst])
         let r = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", tmp, "--dst", dst])
         if r.code == 0 {
-            log.append("LaunchDaemon OK")
-            _ = SpawnUtil.rootRun("/bin/launchctl", args: ["unload", dst])
-            _ = SpawnUtil.rootRun("/bin/launchctl", args: ["load", dst])
+            log.append("LaunchDaemon plist OK")
+            // 不在此 launchctl load：RootHide 上易卡住；守护靠 runbg 拉起
         } else {
             log.append("LaunchDaemon skip")
         }
@@ -304,39 +303,34 @@ enum DeployEnvironment {
 
     private static func startWatch(sy: URL, root: String, log: inout [String]) throws {
         stopWatch()
-        Thread.sleep(forTimeInterval: 0.4)
+        Thread.sleep(forTimeInterval: 0.3)
         let bin = "\(root)/sy_watch"
         let ex = SpawnUtil.rootRun(sy.path, args: ["exists", "--path", bin])
         if ex.code != 0 && !FileManager.default.fileExists(atPath: bin) {
-            // 尝试从 App 包再拷一次
             if let src = toolURL("sy_watch") {
                 _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", root])
                 _ = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", bin])
             }
         }
-        // 强制可执行（旧 tipa 拷出来可能是 0644）
         _ = SpawnUtil.rootRun(sy.path, args: ["chmod", "--path", bin, "--mode", "0755"])
         for name in ["sy_kpatch", "sy_mempatch", "syinject"] {
             _ = SpawnUtil.rootRun(sy.path, args: [
                 "chmod", "--path", "\(root)/\(name)", "--mode", "0755"
             ])
         }
-
-        // 清旧心跳，避免误判
         _ = SpawnUtil.rootRun(sy.path, args: [
             "rm", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
         ])
 
-        // 用 syinject runbg 后台拉起 --fg（不依赖 daemonize，也不堵管道）
+        // 只走 runbg，禁止再用 rootRun 直接跑 sy_watch（管道会死等）
         let bg = SpawnUtil.rootRun(sy.path, args: [
             "runbg", "--bin", bin, "--arg", "--fg"
         ])
         let childPid = Int(bg.out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         log.append("runbg pid=\(childPid) code=\(bg.code)")
 
-        // 等心跳最多 5 秒
         var alive = false
-        for _ in 0..<10 {
+        for _ in 0..<6 { // 最多约 3 秒
             Thread.sleep(forTimeInterval: 0.5)
             let heart = SpawnUtil.rootRun(sy.path, args: [
                 "cat", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
@@ -346,23 +340,16 @@ enum DeployEnvironment {
                 break
             }
         }
-        if !alive {
-            // 再试直接 spawn daemon 模式
-            _ = SpawnUtil.rootRun(bin, args: [])
-            Thread.sleep(forTimeInterval: 1.0)
-            let heart2 = SpawnUtil.rootRun(sy.path, args: [
-                "cat", "--path", "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"
-            ])
-            alive = heart2.out.contains("alive=1")
-        }
-        if !alive {
-            throw DeployError.failed(
-                "sy_watch 仍无心跳。请重新「一键部署」后再试。log: \(bg.err.isEmpty ? bg.out : bg.err)"
-            )
-        }
-        log.append("watch heartbeat OK")
 
-        let stamp = "WAIT sy_watch restarted time=\(Int(Date().timeIntervalSince1970))"
+        let stamp: String
+        if alive {
+            log.append("watch heartbeat OK")
+            stamp = "WAIT sy_watch armed time=\(Int(Date().timeIntervalSince1970))"
+        } else {
+            // 不阻断部署：可稍后在内存页「重启守护」/「立即补丁」
+            log.append("watch no heartbeat(non-fatal)")
+            stamp = "WAIT deploy_ok watch_pending time=\(Int(Date().timeIntervalSince1970))"
+        }
         let tmp = NSTemporaryDirectory() + "sy_ports_status.txt"
         try? stamp.write(toFile: tmp, atomically: true, encoding: .utf8)
         _ = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", tmp, "--dst", statusHintPath])

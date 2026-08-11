@@ -595,14 +595,17 @@ int main(int argc, char **argv) {
         if (p < 0) { perror("fork"); return 2; }
         if (p > 0) {
             fprintf(stdout, "%d\n", (int)p);
+            fflush(stdout);
             return 0;
         }
-        /* child */
+        /* child：必须断开继承的 stdout/stderr 管道，否则父进程 wait/读管会死等 */
         setsid();
         int fd = open("/dev/null", O_RDWR);
         if (fd >= 0) {
-            dup2(fd, 0);
-            if (fd > 0) close(fd);
+            dup2(fd, STDIN_FILENO);
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > 2) close(fd);
         }
         char *argv_exec[18];
         int ai = 0;
