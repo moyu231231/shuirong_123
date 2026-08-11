@@ -445,7 +445,7 @@ static void chown_installd(const char *path) {
     chown(path, 33, 33);
 }
 
-/* 按路径子串找 PID（动态注入用）。stdout 只打一个 pid */
+/* 按路径子串或进程短名找 PID。stdout 只打一个 pid */
 static int find_pid_contains(const char *needle) {
     if (!needle || !needle[0]) return -1;
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
@@ -463,6 +463,10 @@ static int find_pid_contains(const char *needle) {
     for (int i = 0; i < n; i++) {
         int pid = procs[i].kp_proc.p_pid;
         if (pid <= 1) continue;
+        if (procs[i].kp_proc.p_comm[0] && strstr(procs[i].kp_proc.p_comm, needle)) {
+            found = pid;
+            break;
+        }
         memset(pathbuf, 0, sizeof(pathbuf));
         if (proc_pidpath(pid, pathbuf, sizeof(pathbuf)) <= 0) continue;
         if (strstr(pathbuf, needle)) {

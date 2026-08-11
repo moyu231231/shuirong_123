@@ -204,7 +204,7 @@ enum DeployEnvironment {
         auto_mempatch=\(autoMempatch ? 1 : 0)
         auto_tweak=\(autoTweak ? 1 : 0)
         settle=\(settleSeconds)
-        contains=\(containsDefault)
+        contains=tmgp.dfm,DFM,dfm,DeltaForce,三角洲
         install_root=\(root)
         bundle=\(targetBundleHint)
         """
@@ -303,15 +303,80 @@ enum DeployEnvironment {
 
     private static func startWatch(sy: URL, root: String, log: inout [String]) throws {
         stopWatch()
-        Thread.sleep(forTimeInterval: 0.3)
+        Thread.sleep(forTimeInterval: 0.4)
         let bin = "\(root)/sy_watch"
         let ex = SpawnUtil.rootRun(sy.path, args: ["exists", "--path", bin])
         if ex.code != 0 && !FileManager.default.fileExists(atPath: bin) {
             throw DeployError.failed("未找到 \(bin)，请重新部署")
         }
-        // sy_watch 会 daemonize：父进程很快退出
+
+        // 先尝试 daemonize
         let r = SpawnUtil.rootRun(bin, args: [])
-        log.append("watch start code=\(r.code)")
+        Thread.sleep(forTimeInterval: 1.0)
+        let pidfile = confDir + "/sy_watch.pid"
+        var alive = false
+        if let data = try? String(contentsOfFile: pidfile, encoding: .utf8),
+           let pid = Int(data.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
+            let chk = SpawnUtil.rootRun("/bin/ps", args: ["-p", "\(pid)"])
+            // ps 不一定有；看 heartbeat
+            alive = true
+            _ = chk
+        }
+        let heart = SpawnUtil.rootRun(sy.path, args: ["cat", "--path",
+            "/var/mobile/Library/Caches/sy_watch_heartbeat.txt"])
+        if heart.out.contains("alive=1") { alive = true }
+
+        if !alive {
+            // 守护没起来：后台常驻 --fg（跟 App 同会话，但能写状态）
+            log.append("daemon fail → fg")
+            DispatchQueue.global(qos: .utility).async {
+                _ = SpawnUtil.rootRun(bin, args: ["--fg"])
+            }
+            Thread.sleep(forTimeInterval: 1.2)
+        }
+        log.append("watch start code=\(r.code) alive=\(alive ? 1 : 0)")
+
+        // 强制刷新状态时间，避免界面仍显示旧 OK
+        let stamp = "WAIT sy_watch restarted time=\(Int(Date().timeIntervalSince1970))"
+        let tmp = NSTemporaryDirectory() + "sy_ports_status.txt"
+        try? stamp.write(toFile: tmp, atomically: true, encoding: .utf8)
+        _ = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", tmp, "--dst", statusHintPath])
+    }
+
+    /// 若游戏已在跑：立刻 settle 较短后补丁一次（不依赖守护）
+    @discardableResult
+    static func patchNow(settleSeconds: Int = 12) throws -> String {
+        let sy = try syinject()
+        let mp = toolURL("sy_kpatch") ?? toolURL("sy_mempatch")
+        guard let mp else { throw DeployError.failed("缺少 sy_kpatch") }
+
+        let needles = ["tmgp.dfm", "DFM", "dfm", "DeltaForce", "三角洲"]
+        var pid = 0
+        for n in needles {
+            let pr = SpawnUtil.rootRun(sy.path, args: ["pid", "--contains", n])
+            if pr.code == 0,
+               let v = Int(pr.out.trimmingCharacters(in: .whitespacesAndNewlines)), v > 1 {
+                pid = v
+                break
+            }
+        }
+        guard pid > 1 else {
+            throw DeployError.failed("未找到游戏进程。请先打开三角洲再点「立即补丁」。")
+        }
+
+        // 写 WAIT，保证内存页时间更新
+        let wait = "WAIT manual_settle pid=\(pid) sec=\(settleSeconds) time=\(Int(Date().timeIntervalSince1970))"
+        let tmp = NSTemporaryDirectory() + "sy_ports_status.txt"
+        try wait.write(toFile: tmp, atomically: true, encoding: .utf8)
+        _ = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", tmp, "--dst", statusHintPath])
+
+        Thread.sleep(forTimeInterval: TimeInterval(max(5, settleSeconds)))
+        let r = SpawnUtil.rootRun(mp.path, args: ["\(pid)"])
+        let msg = (r.err.isEmpty ? r.out : r.err).trimmingCharacters(in: .whitespacesAndNewlines)
+        if r.code != 0 {
+            throw DeployError.failed("补丁失败 pid=\(pid)：\(msg.isEmpty ? "exit \(r.code)" : msg)")
+        }
+        return msg.isEmpty ? "OK pid=\(pid)" : msg
     }
 
     private static func bundledSpoofDylib() -> URL? {
