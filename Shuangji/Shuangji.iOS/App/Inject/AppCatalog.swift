@@ -26,6 +26,7 @@ enum AppCatalog {
             let ver = (item["version"] as? String) ?? ""
             let appType = (item["appType"] as? String) ?? "User"
             let team = (item["teamID"] as? String) ?? ""
+            let dataPath = (item["dataPath"] as? String) ?? ""
             let url = URL(fileURLWithPath: path)
             let injected = BuiltinInjector.isInjected(bundleURL: url, marker: markName)
 
@@ -34,6 +35,7 @@ enum AppCatalog {
                 name: name,
                 version: ver,
                 bundleURL: url,
+                dataContainerPath: dataPath,
                 isUser: appType == "User",
                 teamID: team,
                 isInjected: injected

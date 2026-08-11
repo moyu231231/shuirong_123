@@ -474,9 +474,62 @@ static int find_pid_contains(const char *needle) {
     return found;
 }
 
+static int name_is_device_id(const char *n) {
+    if (!n || !*n) return 0;
+    static const char *keys[] = {
+        "TssSDK", "tss_sdk", "tsssdk", "tersafe", "Tersafe",
+        "DeviceID", "deviceid", "IDFV", "idfv", "iDevIDFV",
+        "mrpcs", "MRPCS", "anticheat", "AntiCheat", "ano_tmp",
+        "gcloud", "GCloud", "tdm_", "TDM", "ACE_", NULL
+    };
+    for (int i = 0; keys[i]; i++) {
+        if (strstr(n, keys[i])) return 1;
+    }
+    return 0;
+}
+
+static int cleandevid_walk(const char *dir, int depth, int *removed) {
+    if (!dir || depth > 8) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+        char path[1400];
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        struct stat st;
+        if (lstat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            cleandevid_walk(path, depth + 1, removed);
+            /* 空目录 / 命中名的目录也删 */
+            if (name_is_device_id(ent->d_name)) {
+                /* 再扫一层后尝试 rmdir 树：简单 unlink 子后 rmdir */
+                DIR *d2 = opendir(path);
+                if (d2) {
+                    struct dirent *e2;
+                    while ((e2 = readdir(d2)) != NULL) {
+                        if (!strcmp(e2->d_name, ".") || !strcmp(e2->d_name, "..")) continue;
+                        char p2[1500];
+                        snprintf(p2, sizeof(p2), "%s/%s", path, e2->d_name);
+                        unlink(p2);
+                    }
+                    closedir(d2);
+                }
+                if (rmdir(path) == 0 && removed) (*removed)++;
+            }
+        } else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+            if (name_is_device_id(ent->d_name)) {
+                if (unlink(path) == 0 && removed) (*removed)++;
+            }
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "syinject mkdir|cp|rm|chown33|exists|enc|find|pid|cat|deploy|eject|inject ...\n");
+        fprintf(stderr, "syinject mkdir|cp|rm|chown33|exists|cleandevid|enc|find|pid|cat|deploy|eject|inject ...\n");
         return 1;
     }
     const char *mode = argv[1];
@@ -529,6 +582,25 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "exists")) {
         if (!path) { fprintf(stderr, "need --path\n"); return 1; }
         return access(path, F_OK) == 0 ? 0 : 1;
+    }
+    /* 清理应用沙盒内 ACE/TSS 设备标识缓存（须先杀进程） */
+    if (!strcmp(mode, "cleandevid")) {
+        if (!path) { fprintf(stderr, "need --path <dataContainer>\n"); return 1; }
+        if (access(path, F_OK) != 0) { fprintf(stderr, "no container\n"); return 2; }
+        int removed = 0;
+        static const char *subs[] = {
+            "Library/Preferences", "Library/Caches", "Library/Application Support",
+            "Documents", "tmp", "Library", NULL
+        };
+        for (int i = 0; subs[i]; i++) {
+            char sub[1400];
+            snprintf(sub, sizeof(sub), "%s/%s", path, subs[i]);
+            cleandevid_walk(sub, 0, &removed);
+        }
+        /* 根下零散文件 */
+        cleandevid_walk(path, 0, &removed);
+        fprintf(stdout, "removed=%d\n", removed);
+        return 0;
     }
     /* 动态注入：按路径子串查进程 PID */
     if (!strcmp(mode, "pid")) {

@@ -26,7 +26,7 @@ struct InjectHomeView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Text("推荐：内存补丁（GOT+DATA，默认不改 TEXT）")
+                Text("推荐：内存补丁（纯 mempatch，无注入）· 可先清理设备标识")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -88,13 +88,12 @@ struct InjectHomeView: View {
                                     ProgressView()
                                 } else {
                                     Menu {
-                                        Button("内存补丁（ACE机型+稳态）") { memPatch(app) }
+                                        Button("清理设备标识") { cleanDeviceIDs(app) }
+                                        Button("内存补丁（稳态·无注入）") { memPatch(app) }
                                         Button("打开游戏") { launch(app.bundleID) }
-                                        Button("动态注入（备选）") { runtimeInject(app) }
                                         if app.isInjected {
                                             Button("清磁盘残留", role: .destructive) { eject(app) }
                                         }
-                                        Button("磁盘注入（不推荐）", role: .destructive) { diskInject(app) }
                                     } label: {
                                         Text("操作")
                                             .font(.subheadline.weight(.semibold))
@@ -148,7 +147,7 @@ struct InjectHomeView: View {
 
     private func memPatch(_ app: AppEntry) {
         busyID = app.bundleID
-        banner = "纯本地补丁：启动 → 等 tersafe → GOT/DATA/叶子上报…"
+        banner = "纯内存补丁：启动 → 等 tersafe → sy_mempatch（无注入）…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try BuiltinInjector.memPatch(into: app, settleSeconds: 55)
@@ -156,7 +155,7 @@ struct InjectHomeView: View {
                     busyID = nil
                     banner = "内存补丁完成 pid=\(BuiltinInjector.lastRuntimePID)"
                     alertTitle = "内存补丁成功"
-                    alertMsg = "内存补丁完成\n\(BuiltinInjector.lastTargetPath)\n\nGOT + OnRecv + COREREPORT。\n还须：链路里切修改模式 + 小火箭走云端网关，否则仍会被检测上报。\n退游戏需重做。"
+                    alertMsg = "\(BuiltinInjector.lastTargetPath)\n\n仅 DATA 门闩 + GOT，未注入 dylib。\n到「内存」页检查状态。\n还须：修改模式 + 小火箭走网关。"
                     showAlert = true
                     reload()
                 }
@@ -172,50 +171,24 @@ struct InjectHomeView: View {
         }
     }
 
-    private func runtimeInject(_ app: AppEntry) {
+    private func cleanDeviceIDs(_ app: AppEntry) {
         busyID = app.bundleID
-        banner = "动态注入中：启动游戏 → 等待 → opainject…"
+        banner = "清理 ACE/TSS 设备标识缓存…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try BuiltinInjector.runtimeInject(into: app, settleSeconds: 28)
+                let out = try BuiltinInjector.cleanDeviceIDs(of: app)
                 DispatchQueue.main.async {
                     busyID = nil
-                    banner = "动态注入完成 pid=\(BuiltinInjector.lastRuntimePID)"
-                    alertTitle = "动态注入成功"
-                    alertMsg = "隐蔽动态注入完成\n\(BuiltinInjector.lastTargetPath)\n\n备选方案（易被扫镜像）。\n推荐改用「内存补丁」。\n退游戏需重注。"
+                    banner = "设备标识已清理"
+                    alertTitle = "清理完成"
+                    alertMsg = "\(out)\n\n已删沙盒内 TssSDK/IDFV/tersafe 等相关缓存。\n建议再点「内存补丁」后进游戏。"
                     showAlert = true
-                    reload()
                 }
             } catch {
                 DispatchQueue.main.async {
                     busyID = nil
                     banner = error.localizedDescription
-                    alertTitle = "动态注入失败"
-                    alertMsg = error.localizedDescription
-                    showAlert = true
-                }
-            }
-        }
-    }
-
-    private func diskInject(_ app: AppEntry) {
-        busyID = app.bundleID
-        banner = nil
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try BuiltinInjector.inject(into: app)
-                DispatchQueue.main.async {
-                    busyID = nil
-                    banner = "磁盘注入完成（易被扫）"
-                    alertTitle = "磁盘注入完成"
-                    alertMsg = "已写入 LC，ACE 可能启动即拉闸。\n建议改用「动态注入」。"
-                    showAlert = true
-                    reload()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    busyID = nil
-                    alertTitle = "失败"
+                    alertTitle = "清理失败"
                     alertMsg = error.localizedDescription
                     showAlert = true
                 }

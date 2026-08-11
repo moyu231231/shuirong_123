@@ -39,11 +39,18 @@ static NSDictionary *SYDictFromProxy(id proxy) {
         if (t.length) team = t;
     }
 
+    NSString *dataPath = @"";
+    if ([proxy respondsToSelector:@selector(dataContainerURL)]) {
+        NSURL *du = ((NSURL *(*)(id, SEL))objc_msgSend)(proxy, @selector(dataContainerURL));
+        if (du.path.length) dataPath = du.path;
+    }
+
     return @{
         @"bundleID": bid,
         @"name": name,
         @"version": ver,
         @"bundlePath": url.path ?: @"",
+        @"dataPath": dataPath,
         @"appType": type,
         @"teamID": team,
     };
