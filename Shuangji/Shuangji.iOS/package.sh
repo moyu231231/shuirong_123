@@ -210,16 +210,22 @@ if [[ ! -f "$APP_PATH/opainject" ]]; then
   fi
 fi
 
-echo "==> [4b/6] 内置官方 Dopamine.tipa（一键越狱用）"
-# 可用 BUNDLE_DOPAMINE=0 跳过（tipa 会小约 55MB；运行时再下载）
-DOPAMINE_VER="${DOPAMINE_VER:-3.0.4}"
-DOPAMINE_URL="${DOPAMINE_URL:-https://github.com/opa334/Dopamine/releases/download/${DOPAMINE_VER}/Dopamine.tipa}"
+echo "==> [4b/6] 内置 Dopamine.tipa（默认 RootHide；JB_FLAVOR=stock 用官方）"
+# JB_FLAVOR=roothide|stock   BUNDLE_DOPAMINE=0 可跳过
+JB_FLAVOR="${JB_FLAVOR:-roothide}"
+if [[ "$JB_FLAVOR" == "stock" ]]; then
+  DOPAMINE_URL="${DOPAMINE_URL:-https://github.com/opa334/Dopamine/releases/download/3.0.4/Dopamine.tipa}"
+  DOPAMINE_TAG="stock-3.0.4"
+else
+  DOPAMINE_URL="${DOPAMINE_URL:-https://github.com/roothide/Dopamine2-roothide/releases/download/25/Dopamine.tipa}"
+  DOPAMINE_TAG="roothide-2.4.9.25"
+fi
 if [[ "${BUNDLE_DOPAMINE:-1}" == "1" ]]; then
   if curl -fL --retry 3 -o "$APP_PATH/Dopamine.tipa" "$DOPAMINE_URL"; then
     mkdir -p "$APP_PATH/Deploy"
     cp -f "$APP_PATH/Dopamine.tipa" "$APP_PATH/Deploy/Dopamine.tipa"
     ls -lh "$APP_PATH/Dopamine.tipa"
-    echo "  + Dopamine.tipa (${DOPAMINE_VER})"
+    echo "  + Dopamine.tipa (${DOPAMINE_TAG})"
   else
     echo "警告: 下载 Dopamine.tipa 失败，一键越狱将改为运行时下载"
   fi

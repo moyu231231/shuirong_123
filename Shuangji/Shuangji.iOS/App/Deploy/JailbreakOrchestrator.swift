@@ -1,16 +1,33 @@
 import Foundation
 import UIKit
 
-/// 把官方 Dopamine 越狱引擎嵌进水溶C流程：内置 tipa → TrollStore 安装 → 打开 Dopamine → 等待 /var/jb → 自动部署补丁环境
+/// 把 Dopamine / RootHide Dopamine 嵌进水溶C：内置 tipa → TrollStore → 打开越狱 App → 等 jbroot → 自动部署
 enum JailbreakOrchestrator {
 
     static let dopamineBundleIDs = [
         "com.opa334.Dopamine",
-        "com.opa334.Dopamine.RootHide"
+        "com.opa334.Dopamine.RootHide",
+        "com.roothide.Dopamine",
+        "com.roothide.manager"
     ]
-    /// 打包时写入；运行时也可从 GitHub 拉取
-    static let dopamineReleaseTipaURL =
+
+    static let stockDopamineTipaURL =
         "https://github.com/opa334/Dopamine/releases/download/3.0.4/Dopamine.tipa"
+    static let rootHideDopamineTipaURL =
+        "https://github.com/roothide/Dopamine2-roothide/releases/download/25/Dopamine.tipa"
+
+    /// 0=RootHide（推荐打三角洲） 1=官方 Dopamine
+    static var preferredFlavor: Int {
+        get {
+            if UserDefaults.standard.object(forKey: "sy_jb_flavor") == nil { return 0 }
+            return UserDefaults.standard.integer(forKey: "sy_jb_flavor")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "sy_jb_flavor") }
+    }
+
+    static var activeTipaURL: String {
+        preferredFlavor == 0 ? rootHideDopamineTipaURL : stockDopamineTipaURL
+    }
 
     enum Phase: String {
         case idle
@@ -41,7 +58,7 @@ enum JailbreakOrchestrator {
             progress(Progress(phase: phase, detail: detail))
         }
 
-        report(.preparing, "检测环境…")
+        report(.preparing, "检测环境（含 RootHide jbroot）…")
         var state = DeployEnvironment.detect()
         if state.isJailbroken {
             report(.deploying, "已越狱，开始部署补丁环境…")
@@ -50,28 +67,27 @@ enum JailbreakOrchestrator {
             return "已越狱 → " + s
         }
 
-        // 1) 确保 Dopamine 已安装
         if case .none = state {
-            report(.installingDopamine, "准备安装内置 Dopamine…")
+            report(.installingDopamine, preferredFlavor == 0
+                   ? "准备安装 RootHide Dopamine…"
+                   : "准备安装官方 Dopamine…")
             try ensureDopamineInstalled(progress: report)
-            // 装完后重新检测
             for _ in 0..<90 {
                 Thread.sleep(forTimeInterval: 2)
                 state = DeployEnvironment.detect()
                 if state != .none { break }
-                report(.installingDopamine, "等待 TrollStore 完成安装 Dopamine…")
+                report(.installingDopamine, "等待 TrollStore 完成安装…")
             }
             state = DeployEnvironment.detect()
             if case .none = state {
                 throw OrchError.failed(
-                    "未检测到 Dopamine。请确认 TrollStore 已开启 URL Scheme，并在弹窗中点安装。也可手动用 TrollStore 安装 App 内 Dopamine.tipa 后重试。"
+                    "未检测到 Dopamine。请确认 TrollStore 已开启 URL Scheme。RootHide 用户请装 Dopamine2-roothide tipa。"
                 )
             }
         }
 
-        // 2) 打开 Dopamine，等用户点 Jailbreak（内核利用必须在其进程内完成）
         if !state.isJailbroken {
-            report(.waitingJailbreak, "正在打开 Dopamine，请在其中点 Jailbreak…")
+            report(.waitingJailbreak, "打开 Dopamine，请点 Jailbreak…")
             openDopamine()
             let deadline = Date().addingTimeInterval(10 * 60)
             while Date() < deadline {
@@ -79,12 +95,13 @@ enum JailbreakOrchestrator {
                 state = DeployEnvironment.detect()
                 if state.isJailbroken { break }
                 let left = Int(deadline.timeIntervalSinceNow)
-                report(.waitingJailbreak, "等待越狱完成（剩余约 \(max(0, left))s）…请在 Dopamine 内点 Jailbreak")
+                report(.waitingJailbreak,
+                       "等待 jbroot（剩余约 \(max(0, left))s）。RootHide 无 /var/jb，靠扫描 .jbroot-*")
             }
             state = DeployEnvironment.detect()
             if !state.isJailbroken {
                 throw OrchError.failed(
-                    "超时未检测到 /var/jb。请在 Dopamine 内成功 Jailbreak 后，回到水溶C再点一次「一键越狱并部署」。"
+                    "超时未检测到越狱根。RootHide 成功后应有 .jbroot-*。请确认 Jailbreak 成功后再点一次。"
                 )
             }
         }
@@ -157,7 +174,7 @@ enum JailbreakOrchestrator {
            (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? NSNumber)?.intValue ?? 0 > 1_000_000 {
             return dest
         }
-        guard let remote = URL(string: dopamineReleaseTipaURL) else {
+        guard let remote = URL(string: activeTipaURL) else {
             throw OrchError.failed("无效的 Dopamine 下载地址")
         }
         let data: Data
@@ -184,10 +201,11 @@ enum JailbreakOrchestrator {
         for bid in dopamineBundleIDs {
             if SYOpenApplicationWithBundleID(bid) { return }
         }
-        // 再扫一遍已装列表
         let apps = AppCatalog.load()
         if let app = apps.first(where: {
             $0.bundleID.localizedCaseInsensitiveContains("dopamine")
+                || $0.name.localizedCaseInsensitiveContains("Dopamine")
+                || $0.name.localizedCaseInsensitiveContains("RootHide")
         }) {
             _ = SYOpenApplicationWithBundleID(app.bundleID)
         }

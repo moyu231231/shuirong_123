@@ -319,18 +319,16 @@ C) 爱思助手 / 3uTools 线传文件
   TrollStore → 设置 → 打开 URL Scheme → Rebuild Icon Cache
 
 步骤：
-1. TrollStore 安装刚打好的 水溶C.tipa。
-2. 打开水溶C →「部署」→ 点「一键越狱并部署」
-3. 若未装 Dopamine：会弹出 TrollStore 安装，确认安装。
-4. 自动打开 Dopamine 后，你在里面点一次 Jailbreak，等成功。
-5. 水溶C 检测到越狱后会自动部署 sy_kpatch / sy_watch。
-6. 打开三角洲；「内存」页应看到 OK … flag=1 spoof≥1 jb=1。
-7. 「链路」页连双机。
+1. TrollStore 安装 水溶C.tipa。
+2. 部署页选「RootHide Dopamine（推荐）」→「一键越狱并部署」
+3. 按提示装/开 Dopamine，点 Jailbreak。
+4. 成功后自动部署；开三角洲，内存页看 flag=1。
+5. RootHide Manager：别把三角洲勾进「隐藏越狱」（要机型 tweak 时）。
 
 说明：
-- 内核漏洞利用仍在 Dopamine 进程内跑（不能塞进同一 App 当普通按钮函数）。
-- 水溶C 负责：内置 tipa、唤起安装、等待越狱、自动部署补丁。
-- 「机型 tweak」可选；默认只做外部内存补丁。
+- RootHide 没有 /var/jb，水溶C 会扫 .jbroot-*。
+- 改机型串≠真改机型；主价值是 flag/GOT。要实时骗 sysctl 需开机型 tweak。
+- 链路页照常连双机。
 
 
 ============================================================

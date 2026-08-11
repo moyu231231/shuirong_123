@@ -5,6 +5,7 @@ struct DeployHomeView: View {
     @State private var autoMempatch = DeployEnvironment.autoMempatch
     @State private var autoTweak = DeployEnvironment.autoTweak
     @State private var settle = DeployEnvironment.settleSeconds
+    @State private var jbFlavor = JailbreakOrchestrator.preferredFlavor
     @State private var busy = false
     @State private var banner: String?
     @State private var showAlert = false
@@ -23,14 +24,21 @@ struct DeployHomeView: View {
                             .foregroundColor(jbState.isJailbroken ? .green : .orange)
                             .multilineTextAlignment(.trailing)
                     }
+                    Picker("越狱版本", selection: $jbFlavor) {
+                        Text("RootHide Dopamine（推荐）").tag(0)
+                        Text("官方 Dopamine").tag(1)
+                    }
+                    .onChange(of: jbFlavor) { v in
+                        JailbreakOrchestrator.preferredFlavor = v
+                    }
                     HStack {
-                        Text("内置 Dopamine")
+                        Text("内置 tipa")
                         Spacer()
                         Text(JailbreakOrchestrator.hasBundledDopamine ? "已打包" : "运行时下载")
                             .foregroundColor(.secondary)
                     }
                     Button("重新检测") { refresh() }
-                    Text("越狱引擎来自官方 opa334/Dopamine（内置 tipa）。内核利用在 Dopamine 进程内执行；水溶C 负责安装唤起、等待成功后自动部署补丁。")
+                    Text("RootHide 没有 /var/jb，用水溶C 扫描 .jbroot-*。打三角洲时：RootHide Manager 里不要把游戏加入「隐藏越狱」黑名单，否则 tweak 进不去；外部 mempatch 仍可对游戏进程生效。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -85,13 +93,23 @@ struct DeployHomeView: View {
                     }
                 }
 
+                Section("补丁到底有没有用") {
+                    Text("""
+                    · flag/GOT：挡 COREREPORT / OnRecv，这是主价值，和改机型无关。
+                    · 改机型串：只改进程里已缓存的 iPhone*,* 字符串；ACE 若现场读 hw.machine，外部改串无效，需开「机型 tweak」，且游戏不能在 RootHide 黑名单。
+                    · 内存页看到 flag=1 才算补丁生效；spoof=0 只说明没扫到可改串，不等于整套失败。
+                    """)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+
                 Section("流程说明") {
                     Text("""
-                    1. 点「一键越狱并部署」
-                    2. 若未装 Dopamine：自动唤起 TrollStore 安装内置 tipa（需开启 URL Scheme）
-                    3. 自动打开 Dopamine → 你点一次 Jailbreak
-                    4. 检测到 /var/jb 后自动部署 sy_kpatch / sy_watch
-                    5. 开三角洲 → 自动外部补丁；「内存」页看 flag/spoof/jb
+                    1. 选 RootHide Dopamine（推荐）→ 一键越狱并部署
+                    2. TrollStore 安装 tipa（需 URL Scheme）
+                    3. Dopamine 内点 Jailbreak
+                    4. 自动部署到 /var/mobile/Library/shuiyong（兼容 RootHide）
+                    5. 开三角洲 → 内存页看 flag/spoof/jb
                     """)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -110,12 +128,14 @@ struct DeployHomeView: View {
 
     private func refresh() {
         jbState = DeployEnvironment.detect()
+        jbFlavor = JailbreakOrchestrator.preferredFlavor
         autoMempatch = DeployEnvironment.autoMempatch
         autoTweak = DeployEnvironment.autoTweak
         settle = DeployEnvironment.settleSeconds
     }
 
     private func applyPrefs() {
+        JailbreakOrchestrator.preferredFlavor = jbFlavor
         DeployEnvironment.autoMempatch = autoMempatch
         DeployEnvironment.autoTweak = autoTweak
         DeployEnvironment.settleSeconds = settle

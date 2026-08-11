@@ -19,7 +19,11 @@ enum DeployEnvironment {
             switch self {
             case .none: return "未检测到越狱"
             case .dopamineAppOnly: return "已装 Dopamine，尚未越狱"
-            case .jailbroken(let r): return "已越狱（\(r)）"
+            case .jailbroken(let r):
+                if r.contains(".jbroot") || r.contains("containers/Bundle") {
+                    return "RootHide 已越狱"
+                }
+                return "已越狱（rootless）"
             }
         }
 
@@ -60,41 +64,33 @@ enum DeployEnvironment {
     // MARK: - Detect
 
     static func detect() -> JBState {
-        let fm = FileManager.default
-        let roots = ["/var/jb", "/var/jb/usr/lib"]
-        for r in roots where fm.fileExists(atPath: r) {
-            return .jailbroken(root: "/var/jb")
+        if let root = JBRootFinder.findJBRoot() {
+            return .jailbroken(root: root)
         }
-        if let jr = getenv("JB_ROOT_PATH"), let s = String(validatingUTF8: jr), !s.isEmpty,
-           fm.fileExists(atPath: s) {
-            return .jailbroken(root: s)
-        }
-        // Dopamine App 是否安装（未越狱）
         let apps = AppCatalog.load()
         if apps.contains(where: {
             $0.bundleID.localizedCaseInsensitiveContains("dopamine")
+                || $0.bundleID.localizedCaseInsensitiveContains("roothide")
                 || $0.bundleID == "com.opa334.Dopamine"
                 || $0.name.localizedCaseInsensitiveContains("Dopamine")
+                || $0.name.localizedCaseInsensitiveContains("RootHide")
         }) {
             return .dopamineAppOnly
         }
         return .none
     }
 
+    /// 工具优先装到 mobile（RootHide/官方都可用），越狱根下再装一份
     static func installRoot(for state: JBState) -> String {
-        if case .jailbroken = state {
-            return "/var/jb/usr/local/shuiyong"
+        if case .jailbroken(let jb) = state {
+            return jb + "/usr/local/shuiyong"
         }
-        return "/var/mobile/Library/shuiyong"
+        return JBRootFinder.mobileFallback
     }
 
     static func tweakDirs(for state: JBState) -> [String] {
-        guard case .jailbroken = state else { return [] }
-        return [
-            "/var/jb/Library/MobileSubstrate/DynamicLibraries",
-            "/var/jb/usr/lib/TweakInject",
-            "/var/jb/Library/TweakInject"
-        ]
+        guard state.isJailbroken else { return [] }
+        return JBRootFinder.tweakDirs()
     }
 
     // MARK: - Bundled tools
@@ -125,7 +121,11 @@ enum DeployEnvironment {
         try writeConf(root: root)
         log.append("conf OK")
 
-        _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", root])
+        // 始终装到 mobile（RootHide 无 /var/jb 时也能跑）；越狱根再备份一份
+        let installRoots = JBRootFinder.toolInstallRoots()
+        for ir in installRoots {
+            _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", ir])
+        }
         _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", confDir])
 
         let bins = ["sy_kpatch", "sy_mempatch", "sy_watch", "syinject"]
@@ -136,13 +136,19 @@ enum DeployEnvironment {
                 }
                 continue
             }
-            let dst = "\(root)/\(name)"
-            _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", dst])
-            let r = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", dst])
-            if r.code != 0 {
-                throw DeployError.failed("拷贝 \(name) 失败：\(r.err.isEmpty ? r.out : r.err)")
+            for ir in installRoots {
+                let dst = "\(ir)/\(name)"
+                _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", dst])
+                let r = SpawnUtil.rootRun(sy.path, args: ["cp", "--src", src.path, "--dst", dst])
+                if r.code != 0 && ir == JBRootFinder.mobileFallback {
+                    throw DeployError.failed("拷贝 \(name) 失败：\(r.err.isEmpty ? r.out : r.err)")
+                }
             }
             log.append("+\(name)")
+        }
+        log.append("paths=\(installRoots.joined(separator: ","))")
+        if JBRootFinder.isRootHideStyle {
+            log.append("flavor=RootHide")
         }
 
         // LaunchDaemon plist（越狱态）
@@ -161,8 +167,8 @@ enum DeployEnvironment {
             try disableTweak(sy: sy, state: state, log: &log)
         }
 
-        // 拉起守护
-        try startWatch(sy: sy, root: root, log: &log)
+        // 拉起守护：永远从 mobile 路径起（RootHide 兼容）
+        try startWatch(sy: sy, root: JBRootFinder.mobileFallback, log: &log)
 
         let summary = log.joined(separator: " | ")
         UserDefaults.standard.set(true, forKey: "sy_deployed_once")
@@ -172,28 +178,22 @@ enum DeployEnvironment {
 
     static func stopWatch() {
         guard let sy = try? syinject() else { return }
-        let roots = [
-            "/var/jb/usr/local/shuiyong",
-            "/var/mobile/Library/shuiyong"
-        ]
-        for r in roots {
-            let pidfile = confDir + "/sy_watch.pid"
-            if let data = try? String(contentsOfFile: pidfile, encoding: .utf8),
-               let pid = Int(data.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
-                _ = SpawnUtil.rootRun("/bin/kill", args: ["-9", "\(pid)"])
-            }
+        let pidfile = confDir + "/sy_watch.pid"
+        if let data = try? String(contentsOfFile: pidfile, encoding: .utf8),
+           let pid = Int(data.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
+            _ = SpawnUtil.rootRun("/bin/kill", args: ["-9", "\(pid)"])
+        }
+        for r in JBRootFinder.toolInstallRoots() {
             _ = SpawnUtil.rootRun(sy.path, args: ["rm", "--path", "\(r)/sy_watch.pid"])
         }
         _ = SpawnUtil.rootRun("/usr/bin/killall", args: ["-9", "sy_watch"])
     }
 
     static func startWatchOnly() throws -> String {
-        let state = detect()
         let sy = try syinject()
-        let root = installRoot(for: state)
         var log: [String] = []
-        try writeConf(root: root)
-        try startWatch(sy: sy, root: root, log: &log)
+        try writeConf(root: JBRootFinder.mobileFallback)
+        try startWatch(sy: sy, root: JBRootFinder.mobileFallback, log: &log)
         return log.joined(separator: " | ")
     }
 
@@ -222,7 +222,12 @@ enum DeployEnvironment {
     }
 
     private static func installLaunchDaemon(sy: URL, root: String, log: inout [String]) throws {
-        let plistDir = "/var/jb/Library/LaunchDaemons"
+        guard let plistDir = JBRootFinder.launchDaemonDir() else {
+            log.append("LaunchDaemon skip(no jbroot)")
+            return
+        }
+        // RootHide 下 LaunchDaemon 可能不稳定；仍写入，失败不阻断
+        let watchBin = JBRootFinder.mobileFallback + "/sy_watch"
         _ = SpawnUtil.rootRun(sy.path, args: ["mkdir", "--path", plistDir])
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -233,7 +238,7 @@ enum DeployEnvironment {
             <string>com.shuiyong.sywatch</string>
             <key>ProgramArguments</key>
             <array>
-                <string>\(root)/sy_watch</string>
+                <string>\(watchBin)</string>
             </array>
             <key>RunAtLoad</key>
             <true/>

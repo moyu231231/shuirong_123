@@ -112,10 +112,11 @@ static int path_exists(const char *p) {
 
 static const char *resolve_kpatch(void) {
     static const char *cands[] = {
-        "/var/jb/usr/local/shuiyong/sy_kpatch",
+        /* mobile 优先：RootHide 无固定 /var/jb */
         "/var/mobile/Library/shuiyong/sy_kpatch",
-        "/var/jb/usr/local/shuiyong/sy_mempatch",
         "/var/mobile/Library/shuiyong/sy_mempatch",
+        "/var/jb/usr/local/shuiyong/sy_kpatch",
+        "/var/jb/usr/local/shuiyong/sy_mempatch",
         NULL
     };
     for (int i = 0; cands[i]; i++) {

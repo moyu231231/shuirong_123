@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdbool.h>
+#include <dirent.h>
 
 #ifndef SY_AS_KPATCH
 #define SY_AS_KPATCH 0
@@ -52,13 +53,36 @@ static void write_status(const char *line) {
     fclose(f);
 }
 
-/* Dopamine / rootless：存在 /var/jb 即视为已越狱 */
+/* Dopamine rootless 或 RootHide：/var/jb 或 .jbroot-* */
 static int jailbreak_active(void) {
     struct stat st;
     if (stat("/var/jb", &st) == 0) return 1;
     if (stat("/var/jb/usr/lib", &st) == 0) return 1;
     const char *jr = getenv("JB_ROOT_PATH");
     if (jr && jr[0] && stat(jr, &st) == 0) return 1;
+
+    /* RootHide：扫描随机 jbroot */
+    const char *bases[] = {
+        "/var/containers/Bundle/Application",
+        "/var/containers/Bundle",
+        NULL
+    };
+    for (int b = 0; bases[b]; b++) {
+        DIR *d = opendir(bases[b]);
+        if (!d) continue;
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strncmp(ent->d_name, ".jbroot", 7) != 0) continue;
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/%s/usr", bases[b], ent->d_name);
+            if (stat(path, &st) == 0) { closedir(d); return 1; }
+            snprintf(path, sizeof(path), "%s/%s/Library", bases[b], ent->d_name);
+            if (stat(path, &st) == 0) { closedir(d); return 1; }
+            snprintf(path, sizeof(path), "%s/%s/basebin", bases[b], ent->d_name);
+            if (stat(path, &st) == 0) { closedir(d); return 1; }
+        }
+        closedir(d);
+    }
     return 0;
 }
 
@@ -70,14 +94,15 @@ static void try_jb_prep(pid_t pid) {
     if (!jailbreak_active()) return;
     void *h = dlopen("/var/jb/basebin/libjailbreak.dylib", RTLD_LAZY);
     if (!h) h = dlopen("libjailbreak.dylib", RTLD_LAZY);
+    if (!h) h = dlopen("libroothide.dylib", RTLD_LAZY);
     if (!h) return;
     int (*set_dbg)(uint64_t, bool) =
         (int (*)(uint64_t, bool))dlsym(h, "jbclient_platform_set_process_debugged");
     int (*trust_path)(const char *) =
         (int (*)(const char *))dlsym(h, "jbclient_trust_file_by_path");
     if (trust_path) {
-        trust_path("/var/jb/usr/local/shuiyong/sy_kpatch");
         trust_path("/var/mobile/Library/shuiyong/sy_kpatch");
+        trust_path("/var/jb/usr/local/shuiyong/sy_kpatch");
     }
     if (set_dbg) {
         int r = set_dbg((uint64_t)pid, true);
