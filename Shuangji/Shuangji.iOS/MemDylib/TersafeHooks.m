@@ -24,8 +24,9 @@
  */
 
 #define SY_STATUS_PATH "/var/mobile/Library/Caches/sy_ports_status.txt"
+/* Spoof tweak 默认打开安全 report hook（空缓冲，禁止 NULL） */
 #ifndef SY_ENABLE_REPORT_HOOKS
-#define SY_ENABLE_REPORT_HOOKS 0
+#define SY_ENABLE_REPORT_HOOKS 1
 #endif
 
 static const char *kSpoofMachine = "iPhone18,1"; /* iPhone 17 Pro → iDevHwModel */
@@ -135,25 +136,43 @@ static void sy_hook_uidevice(void) {
     sy_swizzle(cls, @selector(localizedModel), (IMP)sy_localizedModel, (void **)&orig_localizedModel);
 }
 
-#pragma mark - 可选 report fishhook（默认关）
+#pragma mark - report fishhook（空缓冲，禁止返回 NULL）
 
 #if SY_ENABLE_REPORT_HOOKS
-static void *orig_unused[10];
-static void *hook_null(void) { return NULL; }
+static void *orig_unused[16];
+/* 足够大的零页：当 AntiDataInfo* / char* 用，strlen=0 且字段多为 0 */
+static uint8_t g_empty_report[256];
+
+static void *hook_empty_ptr(void) {
+    memset(g_empty_report, 0, sizeof(g_empty_report));
+    return g_empty_report;
+}
+
 static int hook_recv_nop(void) { return 0; }
+static int hook_enable_off(void) { return 0; }
+static void hook_del_nop(void *p) { (void)p; }
 
 static void sy_fishhook_report_only(void) {
+    memset(g_empty_report, 0, sizeof(g_empty_report));
     struct rebinding rb[] = {
-        { "TssSDKGetReportData",  (void *)hook_null, &orig_unused[0] },
-        { "TssSDKGetReportData2", (void *)hook_null, &orig_unused[1] },
-        { "TssSDKGetReportData3", (void *)hook_null, &orig_unused[2] },
-        { "TssSDKGetReportData4", (void *)hook_null, &orig_unused[3] },
-        { "tss_get_report_data",  (void *)hook_null, &orig_unused[4] },
-        { "tss_get_report_data2", (void *)hook_null, &orig_unused[5] },
-        { "tss_get_report_data3", (void *)hook_null, &orig_unused[6] },
-        { "tss_get_report_data4", (void *)hook_null, &orig_unused[7] },
-        { "TssSDKOnRecvData",     (void *)hook_recv_nop, &orig_unused[8] },
-        { "tss_sdk_rcv_anti_data", (void *)hook_recv_nop, &orig_unused[9] },
+        /* GetReport → 非空空缓冲（绝不用 NULL） */
+        { "TssSDKGetReportData",  (void *)hook_empty_ptr, &orig_unused[0] },
+        { "TssSDKGetReportData2", (void *)hook_empty_ptr, &orig_unused[1] },
+        { "TssSDKGetReportData3", (void *)hook_empty_ptr, &orig_unused[2] },
+        { "TssSDKGetReportData4", (void *)hook_empty_ptr, &orig_unused[3] },
+        { "tss_get_report_data",  (void *)hook_empty_ptr, &orig_unused[4] },
+        { "tss_get_report_data2", (void *)hook_empty_ptr, &orig_unused[5] },
+        { "tss_get_report_data3", (void *)hook_empty_ptr, &orig_unused[6] },
+        { "tss_get_report_data4", (void *)hook_empty_ptr, &orig_unused[7] },
+        /* 下发 / 签名 */
+        { "TssSDKOnRecvData",      (void *)hook_recv_nop, &orig_unused[8] },
+        { "TssSDKOnRecvSignature", (void *)hook_recv_nop, &orig_unused[9] },
+        { "tss_sdk_rcv_anti_data", (void *)hook_recv_nop, &orig_unused[10] },
+        /* 禁止开启取报 */
+        { "tss_enable_get_report_data", (void *)hook_enable_off, &orig_unused[11] },
+        /* Del：空操作（避免 double-free 空缓冲） */
+        { "TssSDKDelReportData",  (void *)hook_del_nop, &orig_unused[12] },
+        { "tss_del_report_data",  (void *)hook_del_nop, &orig_unused[13] },
     };
     rebind_symbols(rb, sizeof(rb) / sizeof(rb[0]));
 }
@@ -229,12 +248,12 @@ void sy_install_report_hooks(void) {
 #if SY_ENABLE_REPORT_HOOKS
     sy_fishhook_report_only();
 #endif
-    char buf[220];
+    char buf[260];
     snprintf(buf, sizeof(buf),
-             "OK spoof=iphone18,1 os=%s build=%s board=%s time=%ld",
+             "OK spoof=iphone18,1 report=empty os=%s build=%s board=%s time=%ld",
              kSpoofOSVer, kSpoofOSBuild, kSpoofBoard, (long)time(NULL));
     sy_write_status(buf);
-    sy_show_toast(@"水溶C：最新机型/系统画像\niPhone 17 Pro + iOS 26.6");
+    sy_show_toast(@"水溶C：机型画像 + 空 GetReport\niPhone 17 Pro + iOS 26.6");
 }
 
 void sy_thread_chaos_start(void) {}

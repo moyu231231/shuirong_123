@@ -552,10 +552,7 @@ namespace Shuangji.Common
 
         private static bool IsNjHost(string host)
         {
-            if (string.IsNullOrEmpty(host)) return false;
-            host = host.ToLowerInvariant();
-            return host.Contains("anticheatexpert") || host.Contains("cschannel") ||
-                   host.Contains("nj.") || host.Contains("acesdk");
+            return AceCdnRules.IsWatchHost(host);
         }
 
         /// <summary>

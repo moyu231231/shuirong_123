@@ -70,11 +70,12 @@ public enum AceSignatures {
 
     public static func isInterestingHost(_ host: String) -> Bool {
         let h = host.lowercased()
-        return h.contains("anticheatexpert")
-            || h.contains("cschannel")
-            || h.contains("nj.")
-            || h.contains("acesdk")
-            || h.contains("tencent")
+        if AceCdnRulesSwift.isBlackholeIp(h) { return true }
+        return AceCdnRulesSwift.looksAceOrCdnHost(h) || h.contains("tencent")
+    }
+
+    public static func shouldDropAceCdn(_ host: String) -> Bool {
+        AceCdnRulesSwift.shouldDropConnect(host)
     }
 
     public static func contains(_ data: Data, _ pat: [UInt8]) -> Bool {
@@ -92,5 +93,37 @@ public enum AceSignatures {
             i += 1
         }
         return false
+    }
+}
+
+/// 与 PC 端 AceCdnRules.cs 对齐的关键字 / IP 黑洞。
+enum AceCdnRulesSwift {
+    static let hostNeedles: [String] = [
+        "anticheatexpert", "cschannel", "acesdk", "mrpcs", "tsssdk", "tss.",
+        "ano.", "anogs", "iescdn", "qcloud", "cdn-tencent", "tencentcdn",
+        "nj.", "gcloudsdk", "tdm.", "tp2.",
+    ]
+    static let ipBlackhole: [String] = [
+        "183.2.172.46",
+    ]
+
+    static func looksAceOrCdnHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        if isBlackholeIp(h) { return true }
+        for n in hostNeedles where h.contains(n) { return true }
+        return false
+    }
+
+    static func isBlackholeIp(_ hostOrIp: String) -> Bool {
+        var s = hostOrIp.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("["), s.hasSuffix("]") {
+            s = String(s.dropFirst().dropLast())
+        }
+        let low = s.lowercased()
+        return ipBlackhole.contains { $0.lowercased() == low }
+    }
+
+    static func shouldDropConnect(_ host: String) -> Bool {
+        looksAceOrCdnHost(host)
     }
 }

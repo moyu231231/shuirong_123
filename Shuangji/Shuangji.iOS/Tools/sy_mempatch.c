@@ -1,7 +1,8 @@
 ﻿/*
  * ACE mempatch / kpatch (no dylib) — 稳态 + 机型伪装（不注入）：
  *   0) DATA Tier2：COREREPORT 门闩
- *   A) GOT：OnRecv / rcv_anti_data → ret0
+ *   A) GOT：OnRecv / OnRecvSignature / rcv_anti / enable_get_report → ret0
+ *   B) GOT：GetReport* → 仅绑「返回空 C 串」gadget（禁止 NULL）
  *   S) 可写内存里改 iPhone*,* / 系统版本串 → iPhone18,1 + 26.6
  *   J) Dopamine 越狱时：尝试 jbclient 标记 debugged，再 task_for_pid 外部写
  *
@@ -373,6 +374,174 @@ static raddr_t scan_text_ret0(task_t task, raddr_t image) {
     return 0;
 }
 
+/* ADRP Xd, #imm → page base */
+static raddr_t decode_adrp(uint32_t insn, raddr_t pc) {
+    if ((insn & 0x9F000000u) != 0x90000000u) return 0;
+    uint32_t rd = insn & 0x1Fu;
+    if (rd != 0) return 0; /* 只要写 x0 */
+    int64_t immhi = (insn >> 5) & 0x7FFFF;
+    int64_t immlo = (insn >> 29) & 0x3;
+    int64_t imm = (immhi << 2) | immlo;
+    imm = (imm << 43) >> 43; /* 21-bit signed */
+    return (pc & ~((raddr_t)0xFFFu)) + ((raddr_t)imm << 12);
+}
+
+/* ADD Xd, Xn, #imm12（无 shift）*/
+static int decode_add_imm_x0(uint32_t insn, uint32_t *imm12_out) {
+    if ((insn & 0xFFC00000u) != 0x91000000u) return 0;
+    if ((insn & 0x1Fu) != 0) return 0;          /* Rd=x0 */
+    if (((insn >> 5) & 0x1Fu) != 0) return 0;   /* Rn=x0 */
+    if (((insn >> 22) & 0x3u) != 0) return 0;   /* shift=0 */
+    *imm12_out = (insn >> 10) & 0xFFFu;
+    return 1;
+}
+
+static int is_ret(uint32_t insn) {
+    return insn == 0xD65F03C0u;
+}
+
+/* 在镜像里找 "" 的 VA */
+static raddr_t find_empty_cstr_in_image(task_t task, raddr_t image) {
+    struct mach_header_64 mh;
+    if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) return 0;
+    if (mh.magic != MH_MAGIC_64) return 0;
+    raddr_t slide = 0;
+    if (image_slide(task, image, &slide) != 0) return 0;
+
+    raddr_t lc = image + sizeof(mh);
+    uint8_t *chunk = (uint8_t *)malloc(0x4000);
+    if (!chunk) return 0;
+
+    for (uint32_t i = 0; i < mh.ncmds; i++) {
+        struct load_command cmd;
+        if (tread(task, lc, &cmd, sizeof(cmd)) != KERN_SUCCESS) break;
+        if (cmd.cmd == LC_SEGMENT_64) {
+            struct segment_command_64 seg;
+            if (tread(task, lc, &seg, sizeof(seg)) != KERN_SUCCESS) {
+                lc += cmd.cmdsize;
+                continue;
+            }
+            raddr_t sect_addr = lc + sizeof(seg);
+            for (uint32_t s = 0; s < seg.nsects && s < 128; s++) {
+                struct section_64 sect;
+                if (tread(task, sect_addr + sizeof(sect) * s, &sect, sizeof(sect)) != KERN_SUCCESS)
+                    continue;
+                if (strcmp(sect.sectname, "__cstring") != 0 &&
+                    strcmp(sect.sectname, "__const") != 0)
+                    continue;
+                if (sect.size < 1 || sect.size > 8 * 1024 * 1024) continue;
+                raddr_t base = sect.addr + slide;
+                /* 找独立的 "" ：前一字节若可读最好是 0 或段首，本字节为 0 */
+                rsize_t lim = (rsize_t)sect.size;
+                for (rsize_t off = 0; off < lim; ) {
+                    rsize_t nread = lim - off;
+                    if (nread > 0x4000) nread = 0x4000;
+                    if (tread(task, base + off, chunk, nread) != KERN_SUCCESS) break;
+                    for (rsize_t q = 0; q < nread; q++) {
+                        if (chunk[q] != 0) continue;
+                        /* 任意 NUL 都是合法空 C 串起点（禁止用 NULL 充 GetReport） */
+                        free(chunk);
+                        return base + off + q;
+                    }
+                    off += nread;
+                }
+            }
+        }
+        lc += cmd.cmdsize;
+    }
+    free(chunk);
+    return 0;
+}
+
+/*
+ * 找「返回空 C 串指针」的现成 gadget：ADRP x0 + ADD x0,x0,#imm + RET
+ * 目标地址指向已有 ""。禁止用 mov x0,#0（那是 NULL）。
+ */
+static raddr_t scan_text_ret_empty(task_t task, raddr_t image, raddr_t empty_va) {
+    if (!empty_va) return 0;
+    struct mach_header_64 mh;
+    if (tread(task, image, &mh, sizeof(mh)) != KERN_SUCCESS) return 0;
+    if (mh.magic != MH_MAGIC_64) return 0;
+    raddr_t slide = 0;
+    if (image_slide(task, image, &slide) != 0) return 0;
+
+    uint8_t *chunk = (uint8_t *)malloc(0x4000);
+    if (!chunk) return 0;
+
+    raddr_t lc = image + sizeof(mh);
+    for (uint32_t i = 0; i < mh.ncmds; i++) {
+        struct load_command cmd;
+        if (tread(task, lc, &cmd, sizeof(cmd)) != KERN_SUCCESS) break;
+        if (cmd.cmd == LC_SEGMENT_64) {
+            struct segment_command_64 seg;
+            tread(task, lc, &seg, sizeof(seg));
+            if (strncmp(seg.segname, "__TEXT", 16) != 0) {
+                lc += cmd.cmdsize;
+                continue;
+            }
+            raddr_t sect_addr = lc + sizeof(seg);
+            for (uint32_t s = 0; s < seg.nsects && s < 64; s++) {
+                struct section_64 sect;
+                if (tread(task, sect_addr + sizeof(sect) * s, &sect, sizeof(sect)) != KERN_SUCCESS)
+                    continue;
+                if (strcmp(sect.sectname, "__text") != 0) continue;
+                if (sect.size < 12 || sect.size > 32 * 1024 * 1024) continue;
+                raddr_t base = sect.addr + slide;
+                rsize_t lim = sect.size > 0x80000 ? 0x80000 : (rsize_t)sect.size;
+                for (rsize_t off = 0; off + 12 <= lim; ) {
+                    rsize_t nread = lim - off;
+                    if (nread > 0x4000) nread = 0x4000;
+                    if (tread(task, base + off, chunk, nread) != KERN_SUCCESS) break;
+                    for (rsize_t q = 0; q + 12 <= nread; q += 4) {
+                        uint32_t a, b, c;
+                        memcpy(&a, chunk + q, 4);
+                        memcpy(&b, chunk + q + 4, 4);
+                        memcpy(&c, chunk + q + 8, 4);
+                        raddr_t pc = base + off + q;
+                        raddr_t page = decode_adrp(a, pc);
+                        if (!page) continue;
+                        uint32_t imm12 = 0;
+                        if (!decode_add_imm_x0(b, &imm12)) continue;
+                        if (!is_ret(c)) continue;
+                        if (page + imm12 == empty_va) {
+                            free(chunk);
+                            return pc;
+                        }
+                    }
+                    off += (nread > 8) ? (nread - 8) : nread;
+                }
+            }
+        }
+        lc += cmd.cmdsize;
+    }
+    free(chunk);
+    return 0;
+}
+
+static raddr_t find_ret_empty_cstr(task_t task, remote_img_t *imgs, uint32_t nimg) {
+    /* 先收集几个空串地址，再在同镜像 / 系统库里找返回它的 gadget */
+    for (uint32_t ii = 0; ii < nimg; ii++) {
+        const char *p = imgs[ii].path;
+        int prefer = strstr(p, "tersafe") || strstr(p, "libsystem") ||
+                     strstr(p, "libobjc") || strstr(p, "/usr/lib/");
+        if (!prefer) continue;
+        raddr_t empty = find_empty_cstr_in_image(task, imgs[ii].load);
+        if (!empty) continue;
+        raddr_t g = scan_text_ret_empty(task, imgs[ii].load, empty);
+        if (g) return g;
+        /* 跨库：用这个 empty，扫其它系统库 text */
+        for (uint32_t jj = 0; jj < nimg; jj++) {
+            const char *q = imgs[jj].path;
+            if (!strstr(q, "libsystem") && !strstr(q, "libobjc") &&
+                !strstr(q, "libdyld") && !strstr(q, "/usr/lib/"))
+                continue;
+            g = scan_text_ret_empty(task, imgs[jj].load, empty);
+            if (g) return g;
+        }
+    }
+    return 0;
+}
+
 /* Prefer gadget inside tersafe (同镜像，少跨库痕迹)，再退系统库 */
 static raddr_t find_ret0_gadget(task_t task, remote_img_t *imgs, uint32_t nimg,
                                 raddr_t tersafe) {
@@ -658,14 +827,18 @@ int main(int argc, char **argv) {
     }
     fprintf(stdout, "sym anchor @ 0x%llx\n", (unsigned long long)anchor);
 
-    /* GOT 只挡检测下发（返回 int） */
+    /* GOT：OnRecv 族（int 返回 → ret0 安全）+ 禁止 enable_get_report */
     static const char *got_syms[] = {
-        "TssSDKOnRecvData", "tss_sdk_rcv_anti_data", NULL
+        "TssSDKOnRecvData",
+        "TssSDKOnRecvSignature",
+        "tss_sdk_rcv_anti_data",
+        "tss_enable_get_report_data",
+        NULL
     };
-    raddr_t addrs[8];
+    raddr_t addrs[12];
     int naddr = 0;
     memset(addrs, 0, sizeof(addrs));
-    for (int i = 0; got_syms[i] && naddr < 8; i++) {
+    for (int i = 0; got_syms[i] && naddr < 12; i++) {
         raddr_t a = remote_sym(task, tersafe, got_syms[i]);
         if (!a) {
             fprintf(stdout, "miss %s\n", got_syms[i]);
@@ -673,6 +846,28 @@ int main(int argc, char **argv) {
         }
         fprintf(stdout, "sym %s @ 0x%llx\n", got_syms[i], (unsigned long long)a);
         addrs[naddr++] = a;
+    }
+
+    /*
+     * GetReport 禁止绑到 ret0（返回 NULL → 空指针闪退）。
+     * 外部补丁：若找到「返回非空空串」的现成 gadget，才改 GetReport GOT；
+     * 否则交给 Filter tweak 的空缓冲 fishhook。
+     */
+    static const char *report_syms[] = {
+        "TssSDKGetReportData", "TssSDKGetReportData2",
+        "TssSDKGetReportData3", "TssSDKGetReportData4",
+        "tss_get_report_data", "tss_get_report_data2",
+        "tss_get_report_data3", "tss_get_report_data4",
+        NULL
+    };
+    raddr_t report_addrs[12];
+    int nreport = 0;
+    memset(report_addrs, 0, sizeof(report_addrs));
+    for (int i = 0; report_syms[i] && nreport < 12; i++) {
+        raddr_t a = remote_sym(task, tersafe, report_syms[i]);
+        if (!a) continue;
+        fprintf(stdout, "sym %s @ 0x%llx\n", report_syms[i], (unsigned long long)a);
+        report_addrs[nreport++] = a;
     }
 
     raddr_t slide = resolve_slide(task, tersafe, anchor);
@@ -689,9 +884,19 @@ int main(int argc, char **argv) {
     }
     fprintf(stdout, "got_rewrites=%d\n", got_hits);
 
+    raddr_t empty_stub = find_ret_empty_cstr(task, imgs, nimg);
+    fprintf(stdout, "empty_stub @ 0x%llx\n", (unsigned long long)empty_stub);
+    int report_hits = 0;
+    if (empty_stub && nreport > 0) {
+        report_hits = rewrite_gots(task, imgs, nimg, tersafe, report_addrs, nreport, empty_stub);
+    } else {
+        fprintf(stdout, "report got skipped (need empty-cstr gadget or use tweak)\n");
+    }
+    fprintf(stdout, "report_rewrites=%d\n", report_hits);
+
     /* 不 suspend：减少卡死/异常；只写 DATA 门闩，零 TEXT */
     int flag_ok = patch_tdm_flags(task, slide);
-    fprintf(stdout, "flag=%d got=%d\n", flag_ok, got_hits);
+    fprintf(stdout, "flag=%d got=%d report=%d\n", flag_ok, got_hits, report_hits);
 
     /* 可写区改机型/系统串（无 dylib） */
     int spoof_hits = spoof_device_strings(task);
@@ -700,19 +905,20 @@ int main(int argc, char **argv) {
     free(imgs);
     mach_port_deallocate(mach_task_self(), task);
 
-    char buf[320];
-    if (flag_ok > 0 || got_hits > 0 || spoof_hits > 0) {
+    char buf[360];
+    if (flag_ok > 0 || got_hits > 0 || report_hits > 0 || spoof_hits > 0) {
         snprintf(buf, sizeof(buf),
-                 "OK mempatch flag=%d got=%d spoof=%d jb=%d recv=0 report=0 leaf=0 syms=%d pid=%d time=%ld",
-                 flag_ok, got_hits, spoof_hits, jb, naddr, (int)pid, (long)time(NULL));
+                 "OK mempatch flag=%d got=%d report=%d spoof=%d jb=%d recv=1 enable=1 leaf=0 syms=%d pid=%d time=%ld",
+                 flag_ok, got_hits, report_hits, spoof_hits, jb, naddr + nreport,
+                 (int)pid, (long)time(NULL));
         write_status(buf);
         fprintf(stdout, "%s\n", buf);
         return 0;
     }
 
     snprintf(buf, sizeof(buf),
-             "FAIL mempatch flag=0 got=0 spoof=0 jb=%d syms=%d",
-             jb, naddr);
+             "FAIL mempatch flag=0 got=0 report=0 spoof=0 jb=%d syms=%d",
+             jb, naddr + nreport);
     write_status(buf);
     fprintf(stdout, "%s\n", buf);
     return 8;

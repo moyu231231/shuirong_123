@@ -251,6 +251,15 @@ namespace Shuangji.Gateway
                     return;
                 }
 
+                // 局内修改：ACE/MRPCS 检测 CDN 黑洞（花海同族饿死动态下发）
+                if (IsModifyMode(user) && AceCdnRules.ShouldDropConnect(host))
+                {
+                    Log($"ACE CDN drop {user} {host}:{port}");
+                    ReplySocks(stream, 0x05); // connection refused
+                    client.Close();
+                    return;
+                }
+
                 TcpClient remote = new TcpClient();
                 try
                 {
@@ -605,10 +614,7 @@ namespace Shuangji.Gateway
 
         private static bool LooksInterestingHost(string host)
         {
-            if (string.IsNullOrEmpty(host)) return false;
-            host = host.ToLowerInvariant();
-            return host.Contains("anticheatexpert") || host.Contains("cschannel") ||
-                   host.Contains("nj.") || host.Contains("acesdk") || host.Contains("tencent");
+            return AceCdnRules.IsWatchHost(host);
         }
 
         /// <summary>解密目标：01 00 00 0E … 0A 92（NJ 上行举报体）。</summary>

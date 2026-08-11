@@ -98,9 +98,11 @@ struct DeployHomeView: View {
 
                 Section("补丁到底有没有用") {
                     Text("""
-                    · flag/GOT：挡 COREREPORT / OnRecv，这是主价值，和改机型无关。
-                    · 改机型串：只改进程里已缓存的 iPhone*,* 字符串；ACE 若现场读 hw.machine，外部改串无效，需开「机型 tweak」，且游戏不能在 RootHide 黑名单。
-                    · 内存页看到 flag=1 才算补丁生效；spoof=0 只说明没扫到可改串，不等于整套失败。
+                    · flag/GOT ≠ 花海。花海主收益是饿死 MRPCS 动态下发；我们要叠层才接近。
+                    · 叠层：小火箭→Gateway（局内 ACE CDN 黑洞 + 4013/检测文件）+ mempatch（flag + OnRecv + 空 GetReport）+ 可选机型 tweak。
+                    · GetReport 空缓冲挡 send_gs；绝不能返回 NULL（会闪退）。状态里 report≥1 或 tweak 写 report=empty 才算这条通了。
+                    · 「状态 VPN」不拦包。必须走小火箭连云端 Gateway。
+                    · 内存页看到 flag=1 才算门闩生效；spoof=0 只说明没扫到可改串。
                     """)
                     .font(.caption)
                     .foregroundColor(.secondary)

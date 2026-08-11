@@ -88,6 +88,10 @@
 ```
 
 内存层专门补 tersafe 的 **send_gs（走游戏服）**——纯网络层最容易漏的那条。
+做法：GetReport → 空缓冲（禁止 NULL）；enable_get_report → 关掉；Gateway 局内黑洞 ACE CDN。
+
+花海级效果 ≠ 只开机型/flag，必须叠层：
+`Gateway CDN drop + 4013/检测文件 + GetReport 空 + 机型`。
 
 ---
 

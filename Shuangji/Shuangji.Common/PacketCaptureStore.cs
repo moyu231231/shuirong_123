@@ -84,13 +84,8 @@ namespace Shuangji.Common
         {
             if (port == 65010 || port == 10012 || port == 10011 || port == 10013)
                 return true;
-            if (!string.IsNullOrEmpty(host))
-            {
-                var h = host.ToLowerInvariant();
-                if (h.Contains("anticheatexpert") || h.Contains("cschannel")
-                    || h.Contains("nj.") || h.Contains("acesdk"))
-                    return true;
-            }
+            if (AceCdnRules.IsWatchHost(host))
+                return true;
             return data != null && (HasNjMarker(data) || Has4013(data));
         }
 
