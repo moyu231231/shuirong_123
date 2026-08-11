@@ -183,5 +183,49 @@ RWX / maps 扫描                  |  @_vm_region_64 / mach_vm_region_recurse
 我们现在大约只覆盖了他们的 Tier2 半截（COREREPORT TEXT）+ OnRecv，
 缺 Tier1（扫器注册）和 DATA 开关，以及 GS 出口。
 
-TEXT 里现成 ret0 小工具有 37 处（MOV X0,#0; RET）——GOT 改写应优先用 so 内 gadget，
-不一定非要去系统库找。
+================================================================
+八、对照「花海」开源分析（三角洲 MRPCS 下发饿死术）
+================================================================
+花海本质（Android root）：
+  1) iptables TPROXY：按游戏 UID 把流量透明导到本机 SOCKS:9898
+  2) 端口服按 IP 规则拦/改「威严」下发的检测 CDN（例 183.2.172.46）
+  3) 机型伪装成华为 + PC 标识 → ACE 误判环境 → MRPCS 动态包始终只有约 7 个基线文件
+  4) 清 ano_tmp；setenforce 晃一下；杀进程重建规则
+  效果叙事：不下发行为/举报用的额外检测文件 → 「无视举报/行为」
+
+和我们（iOS + 云端 Gateway）的映射：
+  花海 iptables+TPROXY     ≈  小火箭 SOCKS → 云端 Gateway:1080（已有）
+  花海拦检测 CDN IP        ≈  Gateway 对 anticheatexpert / 65010 下行检测文件 TLV
+                              + 应补：对 MRPCS/CDN 固定 IP 的 DROP/黑洞（不只 65010）
+  花海机型伪装             ≈  iOS 侧改 TssSDKSetUserInfo / 环境指纹（tersafe 内）
+                              本地 so 有 MRPCS RTTI，但无 ano_tmp 路径（Android 专有）
+  花海「只留 7 文件」      ≈  我们下行检测文件过滤的「终极形态」：
+                              不是局里逐包拦 4013，而是让动态规则根本下不来
+
+关键纠正（别再只盯 TEXT 补丁）：
+  · 花海主收益在「网络层饿死 MRPCS 动态下发 + 画像误判」
+  · 我们已有 65010 检测文件 TTL 拦截 = 同族半成品
+  · 内存门闩仍有用（挡 COREREPORT/已加载的扫描），但补不齐「新文件下发」这条
+  · iOS 没有 iptables/UID TPROXY；等价物就是强制全游戏走 Gateway，并在 Gateway 扩 IP/域名 ACL
+
+建议落地优先级：
+  P0 局内修改模式继续拦 65010 上行4013 + 下行检测文件（已有）
+  P1 Gateway 增加「ACE CDN / 已知威严 IP」黑洞列表（含 183.2.172.46 等抓到的）
+  P2 抓一局：MRPCS 下载的真实 host/IP/SNI，固化进规则（比抄死 IP 稳）
+  P3 ✅ 机型伪装（按用户要求上到最新）：
+       iDevHwModel ← hw.machine = iPhone18,1（iPhone 17 Pro）
+       hw.model = V53AP
+       iDevSysVer ← 26.6；kern.osversion = 23G71
+       iDevSysName ← iPhone OS
+       状态：spoof=iphone18,1+ios26.6
+  P4 不要在 iOS 上模拟 chattr/ano_tmp；找沙盒内 tersafe 缓存目录另说
+
+ACE iOS 机型标记（本地 tersafe 证实）：
+  TDM 键：iDevHwModel / iDevSysName / iDevSysVer / iDevRes / iDevIDFV / iCPUName …
+  另有 emulator_name= 与 CDN 键（sc2_w_cdn）同簇
+  官方 setuserinfo 只传账号类型/openid，不传机型
+  公开结论：浅改机型在现代 ACE 上易自曝；iOS 应保持「像一台普通真机」
+
+注意：花海是 Magisk/root + 内核透明代理；TrollStore iOS 做不到同款 iptables。
+     能抄的是「饿死下发」策略，机型必须按平台各做各的。
+     机型伪装若注入太晚（tersafe 已采完指纹）效果会弱，故 memPatch 改为进程起来就注入。

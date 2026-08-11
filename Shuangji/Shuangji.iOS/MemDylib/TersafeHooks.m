@@ -5,18 +5,33 @@
 #import <mach-o/dyld.h>
 #import <unistd.h>
 #import <stdio.h>
+#import <string.h>
+#import <errno.h>
+#import <sys/sysctl.h>
 #import <sys/stat.h>
 #import <time.h>
 #import "TersafeThreadChaos.h"
 #import "fishhook.h"
 
 /*
- * 不改 tersafe 机器码。fishhook 导入表：
- *   上报：get_report* / TssSDKGetReportData*
- *   检测下发：TssSDKOnRecvData / tss_sdk_rcv_anti_data
+ * ACE iOS 机型标记：
+ *   iDevHwModel ← hw.machine
+ *   iDevSysName ← UIDevice.systemName（真机 "iPhone OS"）
+ *   iDevSysVer  ← UIDevice.systemVersion / kern.osproductversion
+ *
+ * 用户要求：最新机型 + 最新系统，减轻旧设备画像权重。
+ * 当前画像（2026-08）：iPhone 17 Pro (iPhone18,1) + iOS 26.6 (23G71)
  */
 
 #define SY_STATUS_PATH "/var/mobile/Library/Caches/sy_ports_status.txt"
+#ifndef SY_ENABLE_REPORT_HOOKS
+#define SY_ENABLE_REPORT_HOOKS 0
+#endif
+
+static const char *kSpoofMachine = "iPhone18,1"; /* iPhone 17 Pro → iDevHwModel */
+static const char *kSpoofBoard   = "V53AP";      /* board */
+static const char *kSpoofOSVer   = "26.6";       /* iDevSysVer / osproductversion */
+static const char *kSpoofOSBuild = "23G71";      /* kern.osversion */
 
 static void sy_write_status(const char *line) {
     mkdir("/var/mobile/Library/Caches", 0755);
@@ -32,11 +47,99 @@ static void sy_write_status(const char *line) {
     fprintf(stderr, "[水溶C] %s\n", line);
 }
 
-#pragma mark - fishhook（不改 TEXT）
+#pragma mark - sysctlbyname
 
+static int (*orig_sysctlbyname)(const char *, void *, size_t *, void *, size_t);
+
+static int sy_fill_str(void *oldp, size_t *oldlenp, const char *val) {
+    size_t need = strlen(val) + 1;
+    if (!oldp) {
+        *oldlenp = need;
+        return 0;
+    }
+    if (*oldlenp < need) {
+        *oldlenp = need;
+        errno = ENOMEM;
+        return -1;
+    }
+    memcpy(oldp, val, need);
+    *oldlenp = need;
+    return 0;
+}
+
+static int sy_sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
+                          void *newp, size_t newlen) {
+    if (name && oldlenp) {
+        if (!strcmp(name, "hw.machine"))
+            return sy_fill_str(oldp, oldlenp, kSpoofMachine);
+        if (!strcmp(name, "hw.model"))
+            return sy_fill_str(oldp, oldlenp, kSpoofBoard);
+        if (!strcmp(name, "kern.osproductversion"))
+            return sy_fill_str(oldp, oldlenp, kSpoofOSVer);
+        if (!strcmp(name, "kern.osversion"))
+            return sy_fill_str(oldp, oldlenp, kSpoofOSBuild);
+    }
+    return orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
+}
+
+static void sy_hook_sysctl(void) {
+    struct rebinding rb[] = {
+        { "sysctlbyname", (void *)sy_sysctlbyname, (void **)&orig_sysctlbyname },
+    };
+    rebind_symbols(rb, 1);
+}
+
+#pragma mark - UIDevice
+
+static NSString *(*orig_model)(id, SEL);
+static NSString *(*orig_name)(id, SEL);
+static NSString *(*orig_systemName)(id, SEL);
+static NSString *(*orig_systemVersion)(id, SEL);
+static NSString *(*orig_localizedModel)(id, SEL);
+
+static NSString *sy_model(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return @"iPhone";
+}
+static NSString *sy_name(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return @"iPhone";
+}
+static NSString *sy_systemName(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return @"iPhone OS";
+}
+static NSString *sy_systemVersion(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return @"26.6";
+}
+static NSString *sy_localizedModel(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return @"iPhone";
+}
+
+static void sy_swizzle(Class cls, SEL sel, IMP neu, void **orig) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    *orig = (void *)method_getImplementation(m);
+    method_setImplementation(m, neu);
+}
+
+static void sy_hook_uidevice(void) {
+    Class cls = objc_getClass("UIDevice");
+    if (!cls) return;
+    sy_swizzle(cls, @selector(model), (IMP)sy_model, (void **)&orig_model);
+    sy_swizzle(cls, @selector(name), (IMP)sy_name, (void **)&orig_name);
+    sy_swizzle(cls, @selector(systemName), (IMP)sy_systemName, (void **)&orig_systemName);
+    sy_swizzle(cls, @selector(systemVersion), (IMP)sy_systemVersion, (void **)&orig_systemVersion);
+    sy_swizzle(cls, @selector(localizedModel), (IMP)sy_localizedModel, (void **)&orig_localizedModel);
+}
+
+#pragma mark - 可选 report fishhook（默认关）
+
+#if SY_ENABLE_REPORT_HOOKS
 static void *orig_unused[10];
 static void *hook_null(void) { return NULL; }
-/* 收包类：当 int 返回 0 / void 忽略均可 */
 static int hook_recv_nop(void) { return 0; }
 
 static void sy_fishhook_report_only(void) {
@@ -54,8 +157,9 @@ static void sy_fishhook_report_only(void) {
     };
     rebind_symbols(rb, sizeof(rb) / sizeof(rb[0]));
 }
+#endif
 
-#pragma mark - 悬浮窗
+#pragma mark - toast
 
 static UIWindow *sy_toast_window;
 
@@ -102,8 +206,7 @@ static void sy_show_toast(NSString *msg) {
             [vc.view addSubview:lab];
             w.hidden = NO;
             sy_toast_window = w;
-            NSLog(@"[水溶C] %@", msg);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 if (sy_toast_window == w) {
                     w.hidden = YES;
@@ -114,18 +217,6 @@ static void sy_show_toast(NSString *msg) {
     });
 }
 
-#pragma mark - locate
-
-static int sy_tersafe_loaded(void) {
-    uint32_t c = _dyld_image_count();
-    for (uint32_t i = 0; i < c; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (!name) continue;
-        if (strstr(name, "tersafe") || strstr(name, "Tersafe")) return 1;
-    }
-    return 0;
-}
-
 #pragma mark - install
 
 void sy_install_report_hooks(void) {
@@ -133,37 +224,34 @@ void sy_install_report_hooks(void) {
     if (once) return;
     once = 1;
 
-    /* 只 fishhook，绝不 vm_protect 改 tersafe 代码 */
+    sy_hook_sysctl();
+    sy_hook_uidevice();
+#if SY_ENABLE_REPORT_HOOKS
     sy_fishhook_report_only();
-
-    char buf[128];
-    snprintf(buf, sizeof(buf), "OK fishhook=report+recv time=%ld", (long)time(NULL));
+#endif
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "OK spoof=iphone18,1 os=%s build=%s board=%s time=%ld",
+             kSpoofOSVer, kSpoofOSBuild, kSpoofBoard, (long)time(NULL));
     sy_write_status(buf);
-
-    sy_show_toast(@"水溶C：钩子已生效\n报告 + 检测收包\n(fishhook，未改机器码)");
+    sy_show_toast(@"水溶C：最新机型/系统画像\niPhone 17 Pro + iOS 26.6");
 }
 
 void sy_thread_chaos_start(void) {}
 
 __attribute__((constructor))
 static void sy_entry(void) {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        sy_write_status("WAIT loaded");
-        for (int i = 0; i < 40; i++) {
+    sy_hook_sysctl();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sy_hook_uidevice();
+    });
+    sy_write_status("WAIT spoof-armed");
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (int i = 0; i < 8; i++) {
             sleep(1);
-            if (sy_tersafe_loaded() ||
-                dlsym(RTLD_DEFAULT, "tss_get_report_data") ||
-                dlsym(RTLD_DEFAULT, "TssSDKGetReportData") ||
-                dlsym(RTLD_DEFAULT, "TssSDKOnRecvData") ||
-                dlsym(RTLD_DEFAULT, "tss_sdk_rcv_anti_data")) {
-                sleep(3);
-                sy_install_report_hooks();
-                return;
-            }
+            dispatch_sync(dispatch_get_main_queue(), ^{ sy_hook_uidevice(); });
         }
-        /* 无 tersafe 也挂导入表兜底 */
-        sy_fishhook_report_only();
-        sy_write_status("OK fishhook=fallback_no_tersafe");
-        sy_show_toast(@"水溶C：未找到 tersafe\n已挂导入表兜底");
+        sy_install_report_hooks();
     });
 }

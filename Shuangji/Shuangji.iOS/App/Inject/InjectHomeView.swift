@@ -88,7 +88,7 @@ struct InjectHomeView: View {
                                     ProgressView()
                                 } else {
                                     Menu {
-                                        Button("内存补丁（推荐·稳态）") { memPatch(app) }
+                                        Button("内存补丁（ACE机型+稳态）") { memPatch(app) }
                                         Button("打开游戏") { launch(app.bundleID) }
                                         Button("动态注入（备选）") { runtimeInject(app) }
                                         if app.isInjected {

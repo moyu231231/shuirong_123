@@ -1,7 +1,7 @@
 import Foundation
 
-/// 默认 mempatch（稳态）：DATA 门闩 + OnRecv GOT。无任何 TEXT，避免闪退。
-/// 云端 4013 仍作 send_cs 兜底。不 dlopen。
+/// 默认 mempatch：尽早伪装最新机型/系统(iPhone18,1 + iOS 26.6) + DATA 门闩 + OnRecv GOT。
+/// 云端 4013 仍作 send_cs 兜底。
 enum BuiltinInjector {
 
     /// 唯一名，禁止再用 ApolloNetService / 游戏已有库名
@@ -72,7 +72,7 @@ enum BuiltinInjector {
         "libquic_migration.dylib"
     ]
 
-    /// 内存补丁：干净启动 → 等 tersafe → DATA门闩 + GOT + OnRecv/GetReport
+    /// 内存补丁 + 尽早机型伪装（对齐 ACE iOS 真机标记，非安卓华为/PC）
     static func memPatch(into app: AppEntry, settleSeconds: Int = 55) throws {
         guard let sy = toolURL("syinject") else { throw InjectError.noTool("syinject") }
         guard let mp = toolURL("sy_mempatch") else {
@@ -117,6 +117,14 @@ enum BuiltinInjector {
             throw InjectError.failed("未找到游戏进程。请先手动打开游戏，再点「内存补丁」。")
         }
 
+        // 尽早注入机型伪装；失败不阻断后续 mempatch
+        var spoofNote = "spoof=skip"
+        do {
+            spoofNote = try earlyDeviceSpoof(into: app, pid: pid, sy: sy)
+        } catch {
+            spoofNote = "spoof=fail"
+        }
+
         let jitter = Int.random(in: 0...15)
         let wait = max(12, settleSeconds + jitter)
         Thread.sleep(forTimeInterval: TimeInterval(wait))
@@ -141,8 +149,50 @@ enum BuiltinInjector {
         }
 
         lastRuntimePID = pid
-        lastTargetPath = "mempatch pid=\(pid) \(msg.split(separator: "\n").last.map(String.init) ?? "")"
+        let lastLine = msg.split(separator: "\n").last.map(String.init) ?? ""
+        lastTargetPath = "mempatch \(spoofNote) pid=\(pid) \(lastLine)"
         setRuntimeMarked(app.bundleID, on: true)
+    }
+
+    /// 进程起来后立刻注入伪装库（赶在 tersafe 采指纹前）
+    private static func earlyDeviceSpoof(into app: AppEntry, pid: Int, sy: URL) throws -> String {
+        guard let src = bundledDylibURL else { throw InjectError.noDylib }
+        guard let ldid = toolURL("ldid") else { throw InjectError.noTool("ldid") }
+        guard let ctb = toolURL("ct_bypass") else { throw InjectError.noTool("ct_bypass") }
+        guard let opa = toolURL("opainject") else { throw InjectError.noTool("opainject") }
+        let crypto = Bundle.main.bundleURL.appendingPathComponent("libcrypto.3.dylib")
+        guard FileManager.default.fileExists(atPath: crypto.path) else {
+            throw InjectError.failed("缺少 libcrypto.3.dylib")
+        }
+
+        let team = app.teamID.isEmpty ? "0000000000" : app.teamID
+        let fwk = app.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
+        let stealthName = stealthNames.first { !rootExists(sy, fwk.appendingPathComponent($0).path) }
+            ?? "libSparseRecovery_\(Int(Date().timeIntervalSince1970) % 10000).dylib"
+        let dest = fwk.appendingPathComponent(stealthName).path
+
+        var r = rootFs(sy, "mkdir", ["--path", fwk.path])
+        if r.code != 0 { throw InjectError.failed("创建 Frameworks 失败") }
+        _ = rootFs(sy, "rm", ["--path", dest])
+        r = rootFs(sy, "cp", ["--src", src.path, "--dst", dest])
+        if r.code != 0, !copyWithBundledCp(src: src.path, dst: dest) {
+            throw InjectError.failed("复制伪装 dylib 失败")
+        }
+        if let intn = toolURL("install_name_tool") {
+            _ = SpawnUtil.rootRun(intn.path, args: ["-id", "@rpath/\(stealthName)", dest])
+        }
+        try resign(ldid: ldid.path, ctb: ctb.path, path: dest, team: team, keepEnt: false)
+        _ = rootFs(sy, "chown33", ["--path", dest])
+
+        Thread.sleep(forTimeInterval: 2.0)
+        let inj = SpawnUtil.rootRun(opa.path, args: ["\(pid)", dest])
+        Thread.sleep(forTimeInterval: 0.4)
+        _ = rootFs(sy, "rm", ["--path", dest])
+        if inj.code != 0 {
+            let detail = (inj.err.isEmpty ? inj.out : inj.err).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw InjectError.failed(detail.isEmpty ? "opainject exit \(inj.code)" : detail)
+        }
+        return "spoof=iphone18,1+ios26.6"
     }
 
     /// 备选：动态注入（opainject dlopen，会新增镜像）
